@@ -29,3 +29,14 @@ test_speed_13.wav
 *.njsproj
 *.sln
 *.sw?
+
+# Project exports / media files in root
+/*.mp3
+/*.mp4
+/*.wav
+/*.json
+/*.png
+/*.pdf
+/*.pptx
+/*.slides.json
+

@@ -22,8 +22,10 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog,
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
+
+from app.ui.slide_sync_tab import SlideSyncTab
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  STYLESHEET — Dark purple theme
@@ -219,7 +221,53 @@ QLabel#badge-orange {
     font-size: 11px;
     padding: 2px 8px;
 }
+
+/* ── Step indicator ── */
+QLabel#step-active {
+    color: #c4b5fd;
+    font-size: 12px;
+    font-weight: 700;
+    background: transparent;
+}
+QLabel#step-inactive {
+    color: #484f58;
+    font-size: 12px;
+    background: transparent;
+}
+QLabel#step-arrow {
+    color: #30363d;
+    font-size: 12px;
+    background: transparent;
+    padding: 0 6px;
+}
 """
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _read_script_file(path: str) -> str:
+    """Đọc nội dung file văn bản (.txt hoặc .docx) và trả về string."""
+    p = Path(path)
+    if p.suffix.lower() == ".docx":
+        try:
+            import docx
+            doc = docx.Document(str(p))
+            return "\n".join(para.text for para in doc.paragraphs if para.text.strip())
+        except ImportError:
+            raise RuntimeError(
+                "Cần thư viện python-docx để đọc file .docx\n"
+                "Chạy: pip install python-docx"
+            )
+    else:
+        # Thử UTF-8, fallback sang cp1252
+        for enc in ("utf-8", "utf-8-sig", "cp1252"):
+            try:
+                return p.read_text(encoding=enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return p.read_text(errors="replace")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -420,16 +468,35 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
+        # Shared header with step indicator
         root_layout.addWidget(self._build_header())
+
+        # ── Stacked pages ─────────────────────────────────────────────
+        self._stack = QStackedWidget()
+
+        # Page 0: MP3 creation (existing layout)
+        mp3_page = QWidget()
+        mp3_layout = QVBoxLayout(mp3_page)
+        mp3_layout.setContentsMargins(0, 0, 0, 0)
+        mp3_layout.setSpacing(0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
         splitter.addWidget(self._build_left())
         splitter.addWidget(self._build_right())
         splitter.setSizes([640, 380])
-        root_layout.addWidget(splitter, 1)
+        mp3_layout.addWidget(splitter, 1)
+        mp3_layout.addWidget(self._build_footer())
 
-        root_layout.addWidget(self._build_footer())
+        self._stack.addWidget(mp3_page)
+
+        # Page 1: Slide sync tab
+        self._slide_sync_tab = SlideSyncTab()
+        self._slide_sync_tab.request_back.connect(self._go_to_mp3_tab)
+        self._slide_sync_tab.request_export.connect(self._on_export_video_requested)
+        self._stack.addWidget(self._slide_sync_tab)
+
+        root_layout.addWidget(self._stack, 1)
 
     # ── Header ──────────────────────────────────────────────────────────
 
@@ -449,15 +516,29 @@ class MainWindow(QMainWindow):
         title.setStyleSheet(
             "font-size: 17px; font-weight: 700; color: #e6edf3; background:transparent;"
         )
-
-        sub = QLabel("Slide To Video  ·  Text → MP3")
-        sub.setStyleSheet("color: #484f58; font-size: 12px; background:transparent;")
-
         lay.addWidget(title)
-        lay.addSpacing(14)
-        lay.addWidget(sub)
-        lay.addStretch()
+        lay.addSpacing(20)
 
+        # ── Step indicator breadcrumb ──────────────────────────────────
+        self._step1_lbl = QLabel("● Bước 1: Tạo MP3")
+        self._step1_lbl.setObjectName("step-active")
+
+        arrow1 = QLabel("→")
+        arrow1.setObjectName("step-arrow")
+
+        self._step2_lbl = QLabel("○ Bước 2: Đồng bộ Slide")
+        self._step2_lbl.setObjectName("step-inactive")
+
+        arrow2 = QLabel("→")
+        arrow2.setObjectName("step-arrow")
+
+        self._step3_lbl = QLabel("○ Bước 3: Xuất Video")
+        self._step3_lbl.setObjectName("step-inactive")
+
+        for w in [self._step1_lbl, arrow1, self._step2_lbl, arrow2, self._step3_lbl]:
+            lay.addWidget(w)
+
+        lay.addStretch()
         return hdr
 
     # ── Left panel ───────────────────────────────────────────────────────
@@ -514,6 +595,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._build_card_voice())
         lay.addWidget(self._build_card_whisper())
         lay.addWidget(self._build_card_export())
+        lay.addWidget(self._build_card_skip_to_slide())
         lay.addStretch()
 
         return scroll
@@ -670,6 +752,73 @@ class MainWindow(QMainWindow):
         self._export_btn.setObjectName("success")
         self._export_btn.clicked.connect(self._start_export)
         lay.addWidget(self._export_btn)
+
+        return card
+
+    # ── Card: Skip to slide (already have MP3) ────────────────────────
+
+    def _build_card_skip_to_slide(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet("""
+            QFrame#card {
+                background-color: #0d1f12;
+                border: 1px solid #238636;
+                border-radius: 10px;
+                padding: 4px;
+            }
+        """)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        h_row = QHBoxLayout()
+        icon = QLabel("📌")
+        icon.setStyleSheet("font-size:16px; background:transparent;")
+        title = QLabel("ĐÃ CÓ FILE MP3?")
+        title.setObjectName("heading")
+        title.setStyleSheet(
+            "font-size:11px; font-weight:700; color:#3fb950; "
+            "letter-spacing:0.08em; background:transparent;"
+        )
+        h_row.addWidget(icon)
+        h_row.addSpacing(6)
+        h_row.addWidget(title)
+        h_row.addStretch()
+        lay.addLayout(h_row)
+
+        desc = QLabel(
+            "Nếu bạn đã có file .mp3 từ lần trước,\n"
+            "có thể bỏ qua bước tạo MP3 và sang\n"
+            "thẳng bước Đồng bộ Slide."
+        )
+        desc.setStyleSheet("color:#7d8590; font-size:11px; background:transparent;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        # JSON note
+        json_note = QLabel(
+            "💡 Lưu ý: cần file .json timestamps đi kèm MP3 để xuất video chính xác."
+        )
+        json_note.setStyleSheet(
+            "color:#f0883e; font-size:10px; background:transparent;"
+        )
+        json_note.setWordWrap(True)
+        lay.addWidget(json_note)
+
+        skip_btn = QPushButton("➡  Dùng MP3 có sẵn → Đồng bộ Slide")
+        skip_btn.setObjectName("success")
+        skip_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a7f37; color:#fff; border:none;
+                border-radius:6px; font-size:12px; font-weight:700;
+                padding:8px 14px; min-height:34px;
+            }
+            QPushButton:hover { background-color: #238636; }
+            QPushButton:pressed { background-color: #116329; }
+        """)
+        skip_btn.clicked.connect(self._jump_to_slide_with_existing_mp3)
+        lay.addWidget(skip_btn)
 
         return card
 
@@ -921,15 +1070,166 @@ class MainWindow(QMainWindow):
         self._export_btn.setEnabled(True)
 
         if success:
-            mp3_path  = self._out_path.text()
-            json_path = str(Path(mp3_path).with_suffix(".json"))
-            self._set_status("✓ Xuất thành công!")
-            QMessageBox.information(
-                self, "✓ Xuất thành công!",
-                f"MP3:        {mp3_path}\n"
-                f"Timestamps: {json_path}\n\n"
-                "File JSON chứa timestamps từng từ sẵn sàng cho Slide To Video."
-            )
+            mp3_path = self._out_path.text()
+            self._set_status("✓ Xuất thành công! Đang chuyển sang Đồng bộ Slide…")
+            # Auto-switch: JSON luôn có vì vừa xuất xong
+            self._switch_to_slide_tab(mp3_path, has_json=True)
         else:
             self._set_status("❌ Xuất thất bại.")
             QMessageBox.critical(self, "Lỗi xuất file", error)
+
+    # ── Tab switching ─────────────────────────────────────────────────────
+
+    def _jump_to_slide_with_existing_mp3(self):
+        """
+        Cho phép nhảy sang Tab 2 khi người dùng đã có file MP3 từ trước.
+        Bước 1: Chọn file MP3.
+        Bước 2: Tự tìm JSON cùng tên. Nếu không thấy → hỏi browse JSON riêng.
+        """
+        # ── Bước 1: Chọn file MP3 ──────────────────────────────────────
+        mp3_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Bước 1/2 — Chọn file MP3",
+            "",
+            "MP3 Audio (*.mp3);;Tất cả (*.*)",
+        )
+        if not mp3_path:
+            return
+
+        # ── Bước 2: Tự động tìm JSON cùng tên cùng thư mục ───────────
+        auto_json = Path(mp3_path).with_suffix(".json")
+        has_json  = auto_json.exists()
+
+        if not has_json:
+            # Hỏi user muốn chỉ định JSON ở nơi khác, hay bỏ qua
+            from PyQt6.QtWidgets import QMessageBox as MB
+            reply = MB.question(
+                self,
+                "Bước 2/2 — Tìm file timestamps",
+                f"Không tìm thấy file .json cùng tên:\n"
+                f"  {auto_json}\n\n"
+                "Bạn muốn làm gì?",
+                MB.StandardButton.Open   |   # "Chọn file JSON…"
+                MB.StandardButton.Ignore |   # "Bỏ qua, tiếp tục"
+                MB.StandardButton.Cancel,    # "Huỷ"
+                MB.StandardButton.Open,
+            )
+
+            if reply == MB.StandardButton.Cancel:
+                return
+
+            elif reply == MB.StandardButton.Open:
+                # Cho browse JSON thủ công
+                json_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Bước 2/2 — Chọn file timestamps JSON",
+                    str(Path(mp3_path).parent),  # mở cùng thư mục MP3
+                    "JSON Timestamps (*.json);;Tất cả (*.*)",
+                )
+                if not json_path:
+                    return  # user cancel dialog JSON
+                # Copy/link json vào cùng tên với mp3 (không copy, chỉ track path)
+                # → truyền has_json=True vì user đã chỉ định file
+                # Lưu đường dẫn json custom để dùng sau
+                self._custom_json_path = json_path
+                has_json = True
+            else:
+                # Ignore — tiếp tục không có JSON
+                self._custom_json_path = ""
+                has_json = False
+        else:
+            self._custom_json_path = ""  # dùng auto-detect
+
+        # ── Bước 3: Tìm kịch bản văn bản ─────────────────────────────
+        script_text = self._editor.toPlainText().strip()
+
+        # Ưu tiên đọc từ file .slides.json (đã lưu dự án trước đó)
+        slides_json = Path(mp3_path).with_suffix(".slides.json")
+        resolved_json = self._custom_json_path if (not has_json or not auto_json.exists()) else str(auto_json)
+        if not script_text and slides_json.exists():
+            try:
+                import json as _json
+                with open(slides_json, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                script_text = data.get("script_text", "")
+            except Exception:
+                pass
+
+        # Tiếp theo: reconstruct từ timestamps JSON (sentences[].text)
+        if not script_text and resolved_json and Path(resolved_json).exists():
+            try:
+                import json as _json
+                with open(resolved_json, "r", encoding="utf-8") as f:
+                    json_data = _json.load(f)
+                sentences = [s.get("text", "") for s in json_data.get("sentences", [])]
+                script_text = " ".join(sentences)
+            except Exception:
+                pass
+
+        # Fallback: hỏi user chọn file kịch bản
+        if not script_text:
+            reply = QMessageBox.question(
+                self,
+                "Kịch bản trống",
+                "Không tìm thấy kịch bản văn bản tự động.\n\n"
+                "Bạn có muốn chọn file kịch bản (.txt / .docx) không?\n"
+                "(Hoặc chọn Không để tiếp tục với editor trống)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                txt_path, _ = QFileDialog.getOpenFileName(
+                    self, "Chọn file kịch bản", str(Path(mp3_path).parent),
+                    "Văn bản (*.txt *.docx);;Tất cả (*.*)"
+                )
+                if txt_path:
+                    try:
+                        script_text = _read_script_file(txt_path)
+                    except Exception as e:
+                        QMessageBox.warning(self, "Lỗi đọc file", str(e))
+
+        self._switch_to_slide_tab(mp3_path, script_text=script_text, has_json=has_json)
+
+
+
+    def _switch_to_slide_tab(self, mp3_path: str, script_text: str = "", has_json: bool = True):
+        """Chuyển sang tab đồng bộ slide và truyền context."""
+        if not script_text:
+            script_text = self._editor.toPlainText()
+        self._slide_sync_tab.load_context(script_text, mp3_path, has_json=has_json)
+        self._stack.setCurrentIndex(1)
+        # Update step indicator
+        self._step1_lbl.setText("✓ Bước 1: Tạo MP3")
+        self._step1_lbl.setObjectName("step-inactive")
+        self._step2_lbl.setText("● Bước 2: Đồng bộ Slide")
+        self._step2_lbl.setObjectName("step-active")
+        # Force style refresh
+        for lbl in [self._step1_lbl, self._step2_lbl]:
+            lbl.style().unpolish(lbl)
+            lbl.style().polish(lbl)
+
+    def _go_to_mp3_tab(self):
+        """Quay lại tab tạo MP3."""
+        self._stack.setCurrentIndex(0)
+        self._step1_lbl.setText("● Bước 1: Tạo MP3")
+        self._step1_lbl.setObjectName("step-active")
+        self._step2_lbl.setText("○ Bước 2: Đồng bộ Slide")
+        self._step2_lbl.setObjectName("step-inactive")
+        for lbl in [self._step1_lbl, self._step2_lbl]:
+            lbl.style().unpolish(lbl)
+            lbl.style().polish(lbl)
+
+    def _on_export_video_requested(self, slides: list):
+        """Xử lý khi người dùng nhấn 'Tiếp tục → Xuất Video'."""
+        # Cập nhật step 3 indicator
+        self._step2_lbl.setText("✓ Bước 2: Đồng bộ Slide")
+        self._step2_lbl.setObjectName("step-inactive")
+        self._step3_lbl.setText("● Bước 3: Xuất Video")
+        self._step3_lbl.setObjectName("step-active")
+        for lbl in [self._step2_lbl, self._step3_lbl]:
+            lbl.style().unpolish(lbl)
+            lbl.style().polish(lbl)
+        QMessageBox.information(
+            self, "Bước 3: Xuất Video",
+            f"Sẵn sàng xuất video với {len(slides)} slide.\n\n"
+            "Tính năng Xuất Video sẽ được thêm vào ở phiên bản tiếp theo."
+        )

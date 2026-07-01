@@ -1,0 +1,31 @@
+# Virtual Environment
+.venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large media & model files
+models/
+app/models/
+*.wav
+*.mp3
+test_edge_output.wav
+test_punct.wav
+test_rate.mp3
+test_speed_10.wav
+test_speed_13.wav
+
+# IDE files
+.idea/
+.vscode/
+.history/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

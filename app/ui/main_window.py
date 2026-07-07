@@ -12,7 +12,7 @@ from typing import Optional
 
 from PyQt6.QtCore import (
     Qt, QThread, QTimer, pyqtSignal, QPropertyAnimation,
-    QEasingCurve, QSize,
+    QEasingCurve, QSize, QSettings,
 )
 from PyQt6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QFont,
@@ -397,12 +397,20 @@ class DropZoneWidget(QFrame):
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def _open_dialog(self):
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_dir = settings.value("last_export_dir", None)
+        if not last_dir:
+            last_dir = str(Path.home() / "Downloads")
+            if not Path(last_dir).exists():
+                last_dir = str(Path.home())
+
         path, _ = QFileDialog.getOpenFileName(
-            self, "Mở file văn bản", "",
+            self, "Mở file văn bản", last_dir,
             "Văn bản (*.txt *.docx);;Tất cả (*.*)"
         )
         if path:
             self.file_dropped.emit(path)
+            settings.setValue("last_export_dir", str(Path(path).parent))
 
     # ── Drag events ──────────────────────────────────────────────────────
 
@@ -626,6 +634,13 @@ class MainWindow(QMainWindow):
         self._model_combo = QComboBox()
         for name in self._vi_models:
             self._model_combo.addItem(name)
+        
+        # Load last selected model
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_model = settings.value("last_selected_model", None)
+        if last_model and last_model in self._vi_models:
+            self._model_combo.setCurrentText(last_model)
+
         self._model_combo.currentTextChanged.connect(self._refresh_model_status)
         lay.addWidget(self._model_combo)
 
@@ -676,7 +691,17 @@ class MainWindow(QMainWindow):
         ]
         for label, val in speeds:
             self._speed_combo.addItem(label, val)
-        self._speed_combo.setCurrentIndex(2)  # Default to 1.0x
+        
+        # Load last selected speed
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_speed = settings.value("last_selected_speed", "1.0x (Mặc định)")
+        idx = self._speed_combo.findText(last_speed)
+        if idx >= 0:
+            self._speed_combo.setCurrentIndex(idx)
+        else:
+            self._speed_combo.setCurrentIndex(2)  # Default to 1.0x
+
+        self._speed_combo.currentTextChanged.connect(self._save_speed_setting)
         lay.addWidget(self._speed_combo)
 
         note = QLabel("💡 Preview để tìm giọng Nam phù hợp.")
@@ -734,6 +759,20 @@ class MainWindow(QMainWindow):
         out_row = QHBoxLayout()
         self._out_path = QLineEdit()
         self._out_path.setPlaceholderText("Chọn đường dẫn lưu file .mp3...")
+        
+        # Default save path: Downloads, filename: dd-mm-yyyy.mp3
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_dir = settings.value("last_export_dir", None)
+        if not last_dir:
+            last_dir = str(Path.home() / "Downloads")
+            if not Path(last_dir).exists():
+                last_dir = str(Path.home())
+        
+        from datetime import datetime
+        default_name = f"{datetime.now().strftime('%d-%m-%Y')}.mp3"
+        default_path = str(Path(last_dir) / default_name)
+        self._out_path.setText(default_path)
+
         browse_btn = QPushButton("…")
         browse_btn.setFixedWidth(36)
         browse_btn.clicked.connect(self._browse_output)
@@ -868,6 +907,10 @@ class MainWindow(QMainWindow):
         if not model_name:
             return
 
+        # Save model selection
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("last_selected_model", model_name)
+
         info = self._vi_models.get(model_name, {})
         is_downloaded = self._engine.is_model_downloaded(model_name)
 
@@ -899,6 +942,10 @@ class MainWindow(QMainWindow):
         speakers = self._engine.get_speakers(model_name)
         for name, sid in speakers:
             self._speaker_combo.addItem(f"{name}  (ID: {sid})", sid)
+
+    def _save_speed_setting(self, speed_text: str):
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("last_selected_speed", speed_text)
 
     # ═══════════════════════════════════════════════════════════════════
     #  EVENT HANDLERS
@@ -1011,14 +1058,38 @@ class MainWindow(QMainWindow):
     # ── Export ───────────────────────────────────────────────────────────
 
     def _browse_output(self):
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        current_text = self._out_path.text().strip()
+        
+        initial_dir = ""
+        if current_text:
+            try:
+                initial_dir = str(Path(current_text).parent)
+            except Exception:
+                pass
+                
+        if not initial_dir or not Path(initial_dir).exists():
+            initial_dir = settings.value("last_export_dir", None)
+            
+        if not initial_dir or not Path(initial_dir).exists():
+            initial_dir = str(Path.home() / "Downloads")
+            if not Path(initial_dir).exists():
+                initial_dir = str(Path.home())
+
+        from datetime import datetime
+        default_name = f"{datetime.now().strftime('%d-%m-%Y')}.mp3"
+        default_path = str(Path(initial_dir) / default_name)
+
         path, _ = QFileDialog.getSaveFileName(
-            self, "Chọn vị trí lưu file MP3", "",
+            self, "Chọn vị trí lưu file MP3", default_path,
             "MP3 Audio (*.mp3)"
         )
         if path:
             if not path.lower().endswith(".mp3"):
                 path += ".mp3"
             self._out_path.setText(path)
+            selected_dir = str(Path(path).parent)
+            settings.setValue("last_export_dir", selected_dir)
 
     def _start_export(self):
         text = self._editor.toPlainText().strip()
@@ -1088,10 +1159,17 @@ class MainWindow(QMainWindow):
         Bước 2: Tự tìm JSON cùng tên. Nếu không thấy → hỏi browse JSON riêng.
         """
         # ── Bước 1: Chọn file MP3 ──────────────────────────────────────
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_dir = settings.value("last_export_dir", None)
+        if not last_dir or not Path(last_dir).exists():
+            last_dir = str(Path.home() / "Downloads")
+            if not Path(last_dir).exists():
+                last_dir = str(Path.home())
+
         mp3_path, _ = QFileDialog.getOpenFileName(
             self,
             "Bước 1/2 — Chọn file MP3",
-            "",
+            last_dir,
             "MP3 Audio (*.mp3);;Tất cả (*.*)",
         )
         if not mp3_path:

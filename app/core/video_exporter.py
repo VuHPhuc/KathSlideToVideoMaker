@@ -484,3 +484,522 @@ def _scale_image_ffmpeg(src: str, dst: str, W: int, H: int):
         # Fallback: copy nguyên ảnh
         import shutil
         shutil.copy(src, dst)
+
+
+def _get_video_duration(path: str) -> float:
+    """Lấy thời lượng (giây) của file video bằng ffprobe."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             path],
+            capture_output=True, text=True,
+        )
+        return max(0.1, float(r.stdout.strip()))
+    except Exception:
+        return 5.0
+
+
+def _make_static_video(img_path: str, dst: str, duration: float,
+                       W: int, H: int, fps: int):
+    """Tạo video tĩnh từ một ảnh PNG với thời lượng cho trước."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", str(fps), "-i", img_path,
+        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps}",
+        "-t", str(duration),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",   # không có audio
+        dst,
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg tạo static video thất bại:\n{result.stderr[-800:]}"
+        )
+
+
+def _normalize_video(src: str, dst: str, W: int, H: int, fps: int, duration: Optional[float] = None):
+    """Chuẩn hóa video về cùng resolution/fps, giữ audio gốc. Có thể cắt ngắn theo duration."""
+    cmd = [
+        "ffmpeg", "-y", "-i", src,
+    ]
+    if duration is not None:
+        cmd += ["-t", f"{duration:.3f}"]
+    cmd += [
+        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        dst,
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        # Fallback: copy
+        import shutil
+        shutil.copy(src, dst)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NEW: EXPORT WITH MEDIA ITEMS + TRANSITIONS + AUDIO MIX
+# ═══════════════════════════════════════════════════════════════════════════
+
+def export_video_with_media(
+    media_items,          # List[MediaItem]
+    script_text: str,
+    mp3_path: str,
+    json_path: str,
+    output_path: str,
+    resolution: tuple[int, int] = (1280, 720),
+    fps: int = 25,
+    sub_settings: Optional[dict] = None,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> str:
+    """
+    Xuất video từ List[MediaItem] với hỗ trợ:
+    - Bất kỳ MediaItem (slide/video/ảnh) đã gán: timed theo TTS timestamps
+    - Video clip: giữ nguyên hoặc cắt theo duration được gán (audio được mix)
+    - Ảnh tĩnh: loop theo duration
+    - Transition (xfade) giữa bất kỳ cặp clip nào
+    - Mix âm lượng TTS + video clip riêng lẻ
+    - Subtitle (ASS) — KHÔNG THAY ĐỔI logic
+    """
+    def _rep(pct: int, msg: str):
+        if progress_cb:
+            progress_cb(pct, msg)
+
+    _check_ffmpeg()
+
+    W, H = resolution
+
+    # ── Đọc timestamps TTS ───────────────────────────────────────────────
+    _rep(5, "Đang đọc timestamps…")
+    json_data: dict = {}
+    if json_path and Path(json_path).exists():
+        with open(json_path, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+
+    # ── Tính TTS timeline cho tất cả items được gán ──────────────────────
+    _rep(8, "Đang tính thời điểm xuất hiện…")
+    assigned_items = [m for m in media_items if m.is_assigned]
+
+    tts_timeline: List[SlideTimedEntry] = []
+    if assigned_items and json_data:
+        tts_timeline = build_slide_timeline(assigned_items, script_text, json_data)
+
+    # Map item.id → SlideTimedEntry
+    tts_map: dict = {}
+    for entry in tts_timeline:
+        tts_map[entry.slide.id] = entry
+
+    # ── Tính duration cho từng MediaItem ─────────────────────────────────
+    total_ms = json_data.get("total_duration_ms", 0)
+    if total_ms == 0:
+        sents = json_data.get("sentences", [])
+        if sents:
+            total_ms = sents[-1].get("end_ms", 0)
+    tts_total_sec = total_ms / 1000.0
+
+    # Gán duration cho items từ TTS hoặc tự động lấy từ file gốc
+    for m_item in media_items:
+        if m_item.is_assigned:
+            entry = tts_map.get(m_item.id)
+            if entry:
+                m_item.duration_sec = max(0.1, entry.duration_sec)
+        else:
+            if m_item.media_type == "video":
+                m_item.duration_sec = _get_video_duration(m_item.path)
+
+    _rep(12, f"Đang chuẩn bị {len(media_items)} clip…")
+
+    with tempfile.TemporaryDirectory(prefix="kath_media_") as tmp:
+
+        # ── Bước 1: Tạo clip video trung gian ────────────────────────────
+        clip_paths:   List[str]   = []
+        has_audio:    List[bool]  = []
+        video_vols:   List[float] = []
+        tts_vols:     List[float] = []
+        clip_durs:    List[float] = []
+
+        for i, m_item in enumerate(media_items):
+            _rep(12 + int(35 * i / len(media_items)),
+                 f"Clip {i+1}/{len(media_items)}: {m_item.display_name}…")
+
+            clip_out = os.path.join(tmp, f"clip_{i:04d}.mp4")
+
+            if m_item.media_type == "video":
+                # Cắt video đúng thời lượng nếu được gán
+                duration_to_use = m_item.duration_sec if m_item.is_assigned else None
+                _normalize_video(m_item.path, clip_out, W, H, fps, duration=duration_to_use)
+                has_audio.append(True)
+                video_vols.append(m_item.video_volume)
+                tts_vols.append(m_item.tts_volume)
+
+            else:  # slide hoặc image
+                img_path = m_item.image_path
+                if not img_path or not os.path.exists(img_path):
+                    # Tạo ảnh đen placeholder
+                    placeholder = os.path.join(tmp, f"black_{i}.png")
+                    _make_black_image(placeholder, W, H)
+                    img_path = placeholder
+
+                dur = max(0.1, m_item.duration_sec)
+                _make_static_video(img_path, clip_out, dur, W, H, fps)
+                has_audio.append(False)
+                video_vols.append(0.0)
+                tts_vols.append(1.0)
+
+            clip_paths.append(clip_out)
+            clip_durs.append(_get_video_duration(clip_out))
+
+        if not clip_paths:
+            raise ValueError("Không có clip nào để xuất!")
+
+        # ── Bước 2: Tạo phụ đề ASS ───────────────────────────────────────
+        _rep(50, "Đang tạo phụ đề…")
+        ass_path = ""
+        sub_vf   = f"fps={fps}"
+
+        if sub_settings and sub_settings.get("enabled", True) and json_data:
+            try:
+                def ms_to_ass(ms: float) -> str:
+                    s, ms_ = divmod(int(ms), 1000)
+                    m, s   = divmod(s, 60)
+                    h, m   = divmod(m, 60)
+                    return f"{h}:{m:02d}:{s:02d}.{ms_//10:02d}"
+
+                ass_size = int(sub_settings.get("font_size", 20) * (H / 400))
+                color_map = {
+                    "Trắng":    "FFFFFF",
+                    "Vàng":     "00FFFF",
+                    "Xanh lá":  "00FF00",
+                    "Xanh lam": "FF0000",
+                }
+                color_hex = color_map.get(
+                    sub_settings.get("color", "Trắng"), "FFFFFF")
+
+                style_name = sub_settings.get("style", "Viền đen")
+                if style_name == "Nền đen mờ":
+                    border_style, outline = 3, 4
+                    outline_hex = "5A000000"
+                    back_hex    = "5A000000"
+                elif style_name == "Không viền":
+                    border_style, outline = 1, 0
+                    outline_hex = "00000000"
+                    back_hex    = "80000000"
+                else:
+                    border_style, outline = 1, 2
+                    outline_hex = "00000000"
+                    back_hex    = "80000000"
+
+                pos_pct  = sub_settings.get("position", 1)
+                margin_v = int(H * (pos_pct - 1) / 100)
+
+                # Tính offset TTS: tổng duration của các items đầu timeline trước khi TTS bắt đầu
+                tts_offset_sec = 0.0
+                for m_item in media_items:
+                    if m_item.is_assigned:
+                        break
+                    tts_offset_sec += m_item.duration_sec
+
+                ass_lines = [
+                    "[Script Info]",
+                    "Title: Subtitles", "ScriptType: v4.00+",
+                    "WrapStyle: 0",
+                    f"PlayResX: {W}", f"PlayResY: {H}",
+                    "ScaledBorderAndShadow: yes", "",
+                    "[V4+ Styles]",
+                    "Format: Name, Fontname, Fontsize, PrimaryColour, "
+                    "SecondaryColour, OutlineColour, BackColour, Bold, "
+                    "Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+                    "Spacing, Angle, BorderStyle, Outline, Shadow, "
+                    "Alignment, MarginL, MarginR, MarginV, Encoding",
+                    f"Style: Default,Arial,{ass_size},"
+                    f"&H00{color_hex}&,&H00000000&,"
+                    f"&H{outline_hex}&,&H{back_hex}&,"
+                    f"-1,0,0,0,100,100,0,0,{border_style},"
+                    f"{outline},0,2,10,10,{margin_v},1", "",
+                    "[Events]",
+                    "Format: Layer, Start, End, Style, Name, "
+                    "MarginL, MarginR, MarginV, Effect, Text",
+                ]
+
+                sents = json_data.get("sentences", [])
+                sents = split_sentences_into_single_lines(sents, max_chars=45)
+                for sent in sents:
+                    s_ms = sent.get("start_ms", 0) + tts_offset_sec * 1000
+                    e_ms = sent.get("end_ms",   0) + tts_offset_sec * 1000
+                    txt  = sent.get("text", "").strip()
+                    if txt:
+                        ass_lines.append(
+                            f"Dialogue: 0,{ms_to_ass(s_ms)},"
+                            f"{ms_to_ass(e_ms)},Default,,0,0,0,,{txt}"
+                        )
+
+                ass_path_tmp = os.path.join(tmp, "subtitles.ass")
+                with open(ass_path_tmp, "w", encoding="utf-8") as f:
+                    f.write("\n".join(ass_lines))
+                ass_path = ass_path_tmp
+
+                ass_esc = ass_path.replace("\\", "/").replace(":", "\\:")
+                sub_vf  = f"fps={fps},subtitles='{ass_esc}'"
+            except Exception:
+                pass  # subtitle silently skipped on error
+
+        # ── Bước 3: Ghép video với xfade (hoặc concat đơn giản) ──────────
+        _rep(60, "Đang ghép video…")
+        tmp_video = os.path.join(tmp, "merged_video.mp4")
+
+        has_any_transition = any(
+            m.transition_in != "none" for m in media_items[1:]
+        )
+
+        if len(clip_paths) == 1:
+            # 1 clip — dùng trực tiếp
+            import shutil as _shutil
+            _shutil.copy(clip_paths[0], tmp_video)
+        elif has_any_transition:
+            _merge_with_xfade(clip_paths, media_items, clip_durs,
+                              tmp_video, sub_vf, fps)
+        else:
+            _merge_with_concat(clip_paths, tmp_video, sub_vf, fps)
+
+        # ── Bước 4: Mix audio (TTS + video clips) ────────────────────────
+        _rep(82, "Đang mix audio…")
+        final_output = output_path
+
+        _mix_audio(
+            tmp_video, mp3_path, media_items, clip_durs,
+            has_audio, video_vols, tts_vols, final_output,
+        )
+
+    _rep(100, "✓ Xuất video hoàn thành!")
+    return final_output
+
+
+# ─── Helpers cho export_video_with_media ────────────────────────────────────
+
+def _make_black_image(path: str, W: int, H: int):
+    """Tạo ảnh đen placeholder bằng ffmpeg."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi",
+         f"-i", f"color=black:s={W}x{H}:r=1",
+         "-frames:v", "1", path],
+        capture_output=True,
+    )
+
+
+def _merge_with_concat(clip_paths: List[str], output: str,
+                       vf: str, fps: int):
+    """Ghép nhiều clip bằng concat demuxer (không transition)."""
+    import tempfile as _tf
+    concat_f = output + ".concat.txt"
+    with open(concat_f, "w", encoding="utf-8") as f:
+        for p in clip_paths:
+            f.write(f"file '{p}'\n")
+        # ffmpeg concat demuxer cần lặp dòng cuối
+        f.write(f"file '{clip_paths[-1]}'\n")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", concat_f,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        output,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg concat thất bại:\n{result.stderr[-1000:]}"
+        )
+    try:
+        os.remove(concat_f)
+    except OSError:
+        pass
+
+
+def _merge_with_xfade(clip_paths: List[str], media_items,
+                      clip_durs: List[float], output: str,
+                      vf: str, fps: int):
+    """Ghép clip với xfade transitions."""
+    n = len(clip_paths)
+
+    # Build inputs
+    inputs: List[str] = []
+    for p in clip_paths:
+        inputs += ["-i", p]
+
+    # Build filter_complex
+    filter_parts: List[str] = []
+    cumulative_dur = clip_durs[0]
+    in_label = "[0:v]"
+
+    for i in range(1, n):
+        trans_type = media_items[i].transition_in if i < len(media_items) else "none"
+        trans_dur  = media_items[i].transition_dur if i < len(media_items) else 0.5
+
+        if trans_type == "none":
+            trans_dur = 0.0
+
+        out_label = f"[v{i}]" if i < n - 1 else "[vmerged]"
+
+        if trans_type != "none":
+            offset = max(0.01, cumulative_dur - trans_dur)
+            filter_parts.append(
+                f"{in_label}[{i}:v]xfade="
+                f"transition={trans_type}:"
+                f"duration={trans_dur:.2f}:"
+                f"offset={offset:.3f}"
+                f"{out_label}"
+            )
+            cumulative_dur += clip_durs[i] - trans_dur
+        else:
+            # concat 2 clips: ffmpeg concat filter (n=2)
+            filter_parts.append(
+                f"{in_label}[{i}:v]concat=n=2:v=1:a=0{out_label}"
+            )
+            cumulative_dur += clip_durs[i]
+
+        in_label = out_label
+
+    # Last vf step
+    final_label = "[vout]"
+    filter_parts.append(f"[vmerged]{vf}[vout]")
+    filter_complex = ";".join(filter_parts)
+
+    cmd = (
+        ["ffmpeg", "-y"] + inputs +
+        ["-filter_complex", filter_complex,
+         "-map", "[vout]",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+         "-pix_fmt", "yuv420p",
+         "-an",
+         output]
+    )
+
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        # Fallback: concat đơn giản
+        _merge_with_concat(clip_paths, output, vf, fps)
+
+
+def _mix_audio(merged_video: str, mp3_path: str, media_items,
+               clip_durs: List[float], has_audio: List[bool],
+               video_vols: List[float], tts_vols: List[float],
+               output: str):
+    """
+    Kết hợp video đã ghép với:
+    - TTS audio (delay theo offset của phần slide đầu tiên)
+    - Audio gốc của mỗi video clip (delay theo vị trí trong timeline)
+    """
+    import shutil as _sh
+
+    # Tính offset của TTS audio trong final video
+    tts_start_sec = 0.0
+    for i, m in enumerate(media_items):
+        if m.is_assigned:
+            break
+        tts_start_sec += clip_durs[i] if i < len(clip_durs) else m.duration_sec
+
+    # Thu thập video clips có audio
+    video_audio_clips: List[tuple[int, float]] = []  # (media_idx, start_sec)
+    cur_sec = 0.0
+    for i, m in enumerate(media_items):
+        d = clip_durs[i] if i < len(clip_durs) else m.duration_sec
+        if m.media_type == "video" and has_audio[i]:
+            video_audio_clips.append((i, cur_sec))
+        cur_sec += d
+
+    has_tts  = mp3_path and Path(mp3_path).exists()
+    has_vids = len(video_audio_clips) > 0
+
+    if not has_tts and not has_vids:
+        # Chỉ copy video (không audio)
+        cmd = [
+            "ffmpeg", "-y", "-i", merged_video,
+            "-c:v", "copy", "-an", output,
+        ]
+        subprocess.run(cmd, capture_output=True)
+        return
+
+    # Xây dựng filter_complex cho audio
+    inputs: List[str] = ["-i", merged_video]
+    filter_parts: List[str] = []
+    audio_labels: List[str] = []
+    input_idx = 1
+
+    # TTS audio
+    if has_tts:
+        inputs += ["-i", mp3_path]
+        tts_delay_ms = int(tts_start_sec * 1000)
+        if tts_delay_ms > 0:
+            filter_parts.append(
+                f"[{input_idx}:a]adelay={tts_delay_ms}|{tts_delay_ms}[tts_a]"
+            )
+        else:
+            filter_parts.append(f"[{input_idx}:a]anull[tts_a]")
+        # Âm lượng TTS — lấy theo clip đang phát (default = 1.0)
+        audio_labels.append("[tts_a]")
+        input_idx += 1
+
+    # Video clip audio
+    for media_idx, start_sec in video_audio_clips:
+        delay_ms = int(start_sec * 1000)
+        vol      = video_vols[media_idx] if media_idx < len(video_vols) else 0.3
+        vid_path = media_items[media_idx].path
+
+        inputs += ["-i", vid_path]
+        label   = f"[vid_a{input_idx}]"
+        filter_parts.append(
+            f"[{input_idx}:a]"
+            f"adelay={delay_ms}|{delay_ms},"
+            f"volume={vol:.2f}"
+            f"{label}"
+        )
+        audio_labels.append(label)
+        input_idx += 1
+
+    # Mix tất cả audio
+    n_audio = len(audio_labels)
+    if n_audio == 0:
+        out_audio = "[0:a]"
+    elif n_audio == 1:
+        out_audio = audio_labels[0]
+    else:
+        joined = "".join(audio_labels)
+        filter_parts.append(
+            f"{joined}amix=inputs={n_audio}:normalize=0[aout]"
+        )
+        out_audio = "[aout]"
+
+    filter_complex = ";".join(filter_parts) if filter_parts else ""
+
+    cmd = ["ffmpeg", "-y"] + inputs
+    if filter_complex:
+        cmd += ["-filter_complex", filter_complex,
+                "-map", "0:v", "-map", out_audio]
+    else:
+        cmd += ["-map", "0:v", "-map", out_audio]
+
+    cmd += [
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        "-movflags", "+faststart",
+        output,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        # Fallback: copy video only
+        _sh.copy(merged_video, output)
+

@@ -3,7 +3,17 @@ KathTTS Studio — Entry Point
 Slide To Video Project: Text → MP3 with Word Timestamps
 """
 
+import os
 import sys
+import warnings
+
+# Suppress Hugging Face symlink warnings
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# Suppress Hugging Face unauthenticated request warnings and user warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
+warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QFont, QIcon
 from app.ui.main_window import MainWindow

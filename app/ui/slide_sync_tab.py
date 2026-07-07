@@ -1,6 +1,7 @@
 """
-slide_sync_tab.py — Tab "Đồng bộ Slide"
-Cho phép người dùng import PPTX/PDF, gán slide vào vị trí văn bản.
+slide_sync_tab.py — Tab "Đồng bộ Media / Timeline"
+Cho phép import PPTX/PDF/Video/Ảnh, xây dựng timeline ngang kiểu Clipchamp,
+thêm transition giữa các clip, và gán slide vào vị trí văn bản TTS.
 """
 
 from __future__ import annotations
@@ -8,11 +9,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 from PyQt6.QtCore import (
-    Qt, QThread, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect,
+    Qt, QThread, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect, QTimer,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QPixmap, QTextCharFormat, QTextCursor, QPainter,
@@ -23,17 +26,19 @@ from PyQt6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget, QProgressBar,
     QToolButton, QGridLayout, QTextEdit, QCheckBox, QComboBox,
-    QSlider, QSpinBox,
+    QSlider, QSpinBox, QDoubleSpinBox,
 )
 
 from app.core.slide_processor import (
     SlideInfo, load_pptx, load_pdf, mapping_to_dict, apply_mapping_from_dict,
     SlideProcessorError,
 )
+from app.models.media_item import MediaItem, TRANSITION_TYPES
+from app.ui.timeline_widget import TimelineWidget
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  WORKER THREAD
+#  SLIDE SCRIPT EDITOR (custom painter for pill badges — KHÔNG THAY ĐỔI)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class SlideScriptEditor(QPlainTextEdit):
@@ -46,10 +51,8 @@ class SlideScriptEditor(QPlainTextEdit):
         self.viewport().update()
 
     def paintEvent(self, event):
-        # 1. Paint base text editor
         super().paintEvent(event)
 
-        # 2. Paint rounded pill badges on top of [Slide X] text
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -60,29 +63,24 @@ class SlideScriptEditor(QPlainTextEdit):
             c_end.setPosition(end)
 
             rect_start = self.cursorRect(c_start)
-            rect_end = self.cursorRect(c_end)
+            rect_end   = self.cursorRect(c_end)
 
             if rect_start.top() == rect_end.top():
-                tag_width = rect_end.left() - rect_start.left()
+                tag_width  = rect_end.left() - rect_start.left()
                 tag_height = rect_start.height()
                 if tag_width > 0:
-                    # Margins and overhang to completely cover underlying brackets
                     rect = QRect(
                         rect_start.left() - 4,
-                        rect_start.top() + 1,
+                        rect_start.top()  + 1,
                         tag_width + 8,
-                        tag_height - 2
+                        tag_height - 2,
                     )
-                    
                     bg_color = QColor("#db2777") if is_selected else QColor("#7c3aed")
                     painter.setBrush(bg_color)
                     painter.setPen(Qt.PenStyle.NoPen)
-                    
-                    # Pill radius (capsule style)
                     radius = rect.height() / 2.0
                     painter.drawRoundedRect(rect, radius, radius)
 
-                    # Paint text white bold
                     painter.setPen(QColor("#ffffff"))
                     font = self.font()
                     font.setBold(True)
@@ -91,10 +89,13 @@ class SlideScriptEditor(QPlainTextEdit):
                     elif font.pixelSize() > 0:
                         font.setPixelSize(font.pixelSize() - 1)
                     painter.setFont(font)
-                    
-                    text = f"[Slide {slide_num}]"
-                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                                     f"[Slide {slide_num}]")
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER THREADS
+# ═══════════════════════════════════════════════════════════════════════════
 
 class SlideLoadThread(QThread):
     progress  = pyqtSignal(int, str)
@@ -116,251 +117,272 @@ class SlideLoadThread(QThread):
             self.finished.emit(False, [], str(exc))
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  SLIDE THUMBNAIL CARD
-# ═══════════════════════════════════════════════════════════════════════════
+class MediaImportThread(QThread):
+    """Thread nhập video/ảnh: tạo thumbnail và lấy duration."""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(bool, object, str)  # success, MediaItem, error
 
-THUMB_W = 160
-THUMB_H = 90
-
-class SlideThumbnailCard(QFrame):
-    """Card nhỏ đại diện cho một slide trong danh sách."""
-    clicked = pyqtSignal(int)   # slide index
-    removed = pyqtSignal(int)
-
-    _STYLE_NORMAL = """
-        QFrame#slideCard {
-            background-color: #161b22;
-            border: 1.5px solid #30363d;
-            border-radius: 10px;
-        }
-        QFrame#slideCard:hover {
-            border: 1.5px solid #8b949e;
-        }
-        QLabel#slideBadge {
-            background-color: #21262d;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #8b949e;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px;
-        }
-    """
-    _STYLE_SELECTED = """
-        QFrame#slideCard {
-            background-color: #0f0b1e;
-            border: 1.5px solid #8b5cf6;
-            border-radius: 10px;
-        }
-        QFrame#slideCard:hover {
-            border: 1.5px solid #a78bfa;
-        }
-        QLabel#slideBadge {
-            background-color: #2e1065;
-            border: 1px solid #8b5cf6;
-            border-radius: 6px;
-            color: #c084fc;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px;
-        }
-    """
-    _STYLE_ASSIGNED = """
-        QFrame#slideCard {
-            background-color: #08170e;
-            border: 1.5px solid #10b981;
-            border-radius: 10px;
-        }
-        QFrame#slideCard:hover {
-            border: 1.5px solid #34d399;
-        }
-        QLabel#slideBadge {
-            background-color: #064e3b;
-            border: 1px solid #10b981;
-            border-radius: 6px;
-            color: #34d399;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px;
-        }
-    """
-
-    def __init__(self, slide: SlideInfo, parent=None):
+    def __init__(self, path: str, media_type: str, parent=None):
         super().__init__(parent)
-        self.setObjectName("slideCard")
-        self.slide = slide
-        self._selected = False
-        self._build()
+        self.path       = path
+        self.media_type = media_type   # "video" | "image"
 
-    def _build(self):
-        self.setFixedWidth(THUMB_W + 16)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(4)
+    def run(self):
+        try:
+            import shutil
+            item = MediaItem(media_type=self.media_type, path=self.path)
 
-        # Top row: remove button
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        num_lbl = QLabel(f"#{self.slide.display_number}")
-        num_lbl.setStyleSheet(
-            "color: #8b949e; font-size: 10px; font-weight: 700; background:transparent;"
-        )
-        self._remove_btn = QToolButton()
-        self._remove_btn.setText("×")
-        self._remove_btn.setFixedSize(18, 18)
-        self._remove_btn.setStyleSheet(
-            "QToolButton { color:#7d8590; background:transparent; border:none; "
-            "font-size:14px; font-weight:700; }"
-            "QToolButton:hover { color:#f85149; }"
-        )
-        self._remove_btn.clicked.connect(lambda: self.removed.emit(self.slide.index))
-        top.addWidget(num_lbl)
-        top.addStretch()
-        top.addWidget(self._remove_btn)
-        lay.addLayout(top)
+            if self.media_type == "video":
+                self.progress.emit(20, f"Đang phân tích video: {Path(self.path).name}…")
 
-        # Thumbnail image
-        self._thumb_lbl = QLabel()
-        self._thumb_lbl.setFixedSize(THUMB_W, THUMB_H)
-        self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb_lbl.setStyleSheet(
-            "background-color: #21262d; border-radius: 4px;"
-        )
-        self._load_thumbnail()
-        lay.addWidget(self._thumb_lbl)
+                # Lấy duration qua ffprobe
+                if shutil.which("ffprobe"):
+                    r = subprocess.run(
+                        ["ffprobe", "-v", "error",
+                         "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1",
+                         self.path],
+                        capture_output=True, text=True,
+                    )
+                    try:
+                        item.duration_sec = max(0.5, float(r.stdout.strip()))
+                    except ValueError:
+                        item.duration_sec = 5.0
 
-        # Badge gán
-        self._badge = QLabel("Chưa gán")
-        self._badge.setObjectName("slideBadge")
-        self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._badge.setFixedHeight(22)
-        lay.addWidget(self._badge)
+                # Tạo thumbnail
+                self.progress.emit(50, "Đang tạo thumbnail…")
+                tmp_thumb = tempfile.NamedTemporaryFile(
+                    suffix=".png", delete=False,
+                    prefix="kath_thumb_"
+                )
+                tmp_thumb.close()
+                if shutil.which("ffmpeg"):
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", self.path,
+                         "-ss", "00:00:01", "-vframes", "1",
+                         "-vf", "scale=320:-1",
+                         tmp_thumb.name],
+                        capture_output=True,
+                    )
+                    if os.path.exists(tmp_thumb.name) and os.path.getsize(tmp_thumb.name) > 0:
+                        item.thumbnail_path = tmp_thumb.name
 
-        # Title (clipped)
-        if self.slide.title:
-            title_lbl = QLabel(self.slide.title[:28] + ("…" if len(self.slide.title) > 28 else ""))
-            title_lbl.setStyleSheet(
-                "color: #8b949e; font-size: 10px; background:transparent;"
-            )
-            title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay.addWidget(title_lbl)
+            else:  # image
+                item.duration_sec  = 5.0
+                item.thumbnail_path = self.path  # dùng trực tiếp
 
-        self.setStyleSheet(self._STYLE_NORMAL)
-        self.refresh_state()
+            self.progress.emit(100, "Xong!")
+            self.finished.emit(True, item, "")
 
-    def _load_thumbnail(self):
-        if self.slide.image_path and os.path.exists(self.slide.image_path):
-            pix = QPixmap(self.slide.image_path)
-            self._thumb_lbl.setPixmap(
-                pix.scaled(THUMB_W, THUMB_H,
-                           Qt.AspectRatioMode.KeepAspectRatio,
-                           Qt.TransformationMode.SmoothTransformation)
-            )
-        else:
-            self._thumb_lbl.setText("📊")
-            self._thumb_lbl.setStyleSheet(
-                "background-color: #21262d; border-radius: 4px; "
-                "font-size: 28px; color: #484f58;"
-            )
-
-    def refresh_state(self):
-        if self.slide.is_assigned:
-            snip = self.slide.assigned_text[:22] + "…" if len(self.slide.assigned_text) > 22 else self.slide.assigned_text
-            self._badge.setText(f"✓ {snip}" if snip else "✓ Đã gán")
-        else:
-            self._badge.setText("Chưa gán")
-
-        if self._selected:
-            self.setStyleSheet(self._STYLE_SELECTED)
-        elif self.slide.is_assigned:
-            self.setStyleSheet(self._STYLE_ASSIGNED)
-        else:
-            self.setStyleSheet(self._STYLE_NORMAL)
-
-    def set_selected(self, sel: bool):
-        self._selected = sel
-        self.refresh_state()
-
-    def mousePressEvent(self, event):
-        self.clicked.emit(self.slide.index)
-        super().mousePressEvent(event)
+        except Exception as exc:
+            self.finished.emit(False, None, str(exc))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  DROP ZONE (PPTX / PDF)
+#  DROP ZONE (mở rộng hỗ trợ PPTX/PDF/Video/Ảnh)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class SlideDropZone(QFrame):
-    file_dropped = pyqtSignal(str)
+_SLIDE_EXTS  = (".pptx", ".pdf")
+_VIDEO_EXTS  = (".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv")
+_IMAGE_EXTS  = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp")
+_ALL_EXTS    = _SLIDE_EXTS + _VIDEO_EXTS + _IMAGE_EXTS
 
-    _IDLE = """QFrame#slideDropZone {
+
+class MediaDropZone(QFrame):
+    """Drop zone nhận PPTX/PDF/Video/Ảnh — phát tín hiệu (path, media_type)."""
+    file_dropped = pyqtSignal(str, str)  # path, media_type
+
+    _IDLE = """QFrame#mediaDropZone {
         background-color: #161b22; border: 2px dashed #30363d; border-radius: 10px;
     }"""
-    _HOVER = """QFrame#slideDropZone {
+    _HOVER = """QFrame#mediaDropZone {
         background-color: #1a0e36; border: 2px dashed #7c3aed; border-radius: 10px;
     }"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("slideDropZone")
+        self.setObjectName("mediaDropZone")
         self.setAcceptDrops(True)
-        self.setMinimumHeight(80)
-        self.setMaximumHeight(110)
+        self.setFixedHeight(38)
         self.setStyleSheet(self._IDLE)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 2, 12, 2)
+        lay.setSpacing(10)
 
-        icon = QLabel("📊")
-        icon.setStyleSheet("font-size:28px; background:transparent;")
-
-        info_col = QVBoxLayout()
-        self._lbl = QLabel("Kéo & thả file  .pptx  hoặc  .pdf  vào đây")
-        self._lbl.setStyleSheet("color:#7d8590; font-size:12px; background:transparent;")
-        info_col.addWidget(self._lbl)
-        info_col.addSpacing(2)
+        self._lbl = QLabel("Kéo & thả media vào đây hoặc:")
+        self._lbl.setStyleSheet("color:#7d8590; font-size:11px; background:transparent;")
+        lay.addWidget(self._lbl)
 
         btn_row = QHBoxLayout()
-        for label, filt in [("PPTX", "*.pptx"), ("PDF", "*.pdf")]:
-            btn = QPushButton(f"Import {label}")
-            btn.setFixedHeight(26)
-            btn.clicked.connect(lambda _, f=filt, l=label: self._open_dialog(f, l))
+        btn_row.setSpacing(4)
+        buttons = [
+            ("Import PPTX",  "*.pptx",                "slide"),
+            ("Import PDF",   "*.pdf",                  "slide"),
+            ("Import Video", " ".join(f"*{e}" for e in _VIDEO_EXTS), "video"),
+            ("Import Ảnh",   " ".join(f"*{e}" for e in _IMAGE_EXTS), "image"),
+        ]
+        for label, filt, mtype in buttons:
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(
+                "QPushButton{font-size:10px;padding:1px 6px;}"
+            )
+            btn.clicked.connect(
+                lambda _, f=filt, m=mtype: self._open_dialog(f, m)
+            )
             btn_row.addWidget(btn)
         btn_row.addStretch()
-        info_col.addLayout(btn_row)
+        lay.addLayout(btn_row)
 
-        lay.addWidget(icon)
-        lay.addSpacing(8)
-        lay.addLayout(info_col)
+    def _open_dialog(self, filt: str, media_type: str):
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_dir = settings.value("last_export_dir", None)
+        if not last_dir:
+            last_dir = str(Path.home() / "Downloads")
+            if not Path(last_dir).exists():
+                last_dir = str(Path.home())
 
-    def _open_dialog(self, filt: str, label: str):
-        ext_map = {"*.pptx": "PowerPoint (*.pptx)", "*.pdf": "PDF (*.pdf)"}
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Mở file {label}", "", f"{ext_map[filt]};;Tất cả (*.*)"
+        label_map = {
+            "slide": "Slide (PPTX / PDF)",
+            "video": "Video",
+            "image": "Ảnh",
+        }
+        ext_label = label_map.get(media_type, media_type)
+        # Cho phép chọn NHIỀU file cùng lúc
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, f"Mở {ext_label}", last_dir,
+            f"{ext_label} ({filt});;Tất cả (*.*)"
         )
-        if path:
-            self.file_dropped.emit(path)
+        for path in paths:
+            self.file_dropped.emit(path, media_type)
+        if paths:
+            settings.setValue("last_export_dir", str(Path(paths[0]).parent))
+
+    def _classify(self, path: str) -> Optional[str]:
+        ext = Path(path).suffix.lower()
+        if ext in _SLIDE_EXTS:  return "slide"
+        if ext in _VIDEO_EXTS:  return "video"
+        if ext in _IMAGE_EXTS:  return "image"
+        return None
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            url = event.mimeData().urls()[0].toLocalFile().lower()
-            if url.endswith((".pptx", ".pdf")):
-                event.acceptProposedAction()
-                self.setStyleSheet(self._HOVER)
-                self._lbl.setText("Thả file vào đây ✓")
-                return
+            # Chấp nhận nếu ÍT NHẤT 1 file hợp lệ
+            for url in event.mimeData().urls():
+                if self._classify(url.toLocalFile()):
+                    event.acceptProposedAction()
+                    self.setStyleSheet(self._HOVER)
+                    n = len(event.mimeData().urls())
+                    self._lbl.setText(
+                        f"Thả {n} file vào đây ✓" if n > 1 else "Thả file vào đây ✓"
+                    )
+                    return
         event.ignore()
 
     def dragLeaveEvent(self, event):
         self.setStyleSheet(self._IDLE)
-        self._lbl.setText("Kéo & thả file  .pptx  hoặc  .pdf  vào đây")
+        self._lbl.setText("Kéo & thả  PPTX · PDF · Video · Ảnh  vào đây")
 
     def dropEvent(self, event):
         self.setStyleSheet(self._IDLE)
-        self._lbl.setText("Kéo & thả file  .pptx  hoặc  .pdf  vào đây")
-        url = event.mimeData().urls()[0].toLocalFile()
-        self.file_dropped.emit(url)
+        self._lbl.setText("Kéo & thả  PPTX · PDF · Video · Ảnh  vào đây")
+        # Xử lý TẤT CẢ files được thả vào
+        for url in event.mimeData().urls():
+            path  = url.toLocalFile()
+            mtype = self._classify(path)
+            if mtype:
+                self.file_dropped.emit(path, mtype)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AUDIO MIX PANEL (hiện khi chọn video clip)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AudioMixPanel(QFrame):
+    """Panel nhỏ điều chỉnh âm lượng của clip video đang chọn."""
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._item: Optional[MediaItem] = None
+        self.setStyleSheet("""
+            QFrame { background:#12161c; border:1px solid #21262d; border-radius:6px; }
+            QLabel { background:transparent; color:#8b949e; font-size:10px; }
+        """)
+        self.setFixedHeight(56)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 10, 6)
+        lay.setSpacing(14)
+
+        # TTS volume
+        lay.addWidget(QLabel("🎙 TTS:"))
+        self._tts_slider = QSlider(Qt.Orientation.Horizontal)
+        self._tts_slider.setRange(0, 100)
+        self._tts_slider.setValue(100)
+        self._tts_slider.setFixedWidth(80)
+        self._tts_slider.setStyleSheet(
+            "QSlider::groove:horizontal{height:3px;background:#30363d;border-radius:2px;}"
+            "QSlider::handle:horizontal{width:10px;height:10px;margin:-4px 0;"
+            "background:#7c3aed;border-radius:5px;}"
+            "QSlider::sub-page:horizontal{background:#6d28d9;border-radius:2px;}"
+        )
+        self._tts_lbl = QLabel("100%")
+        self._tts_lbl.setFixedWidth(34)
+        self._tts_slider.valueChanged.connect(self._on_tts_changed)
+        lay.addWidget(self._tts_slider)
+        lay.addWidget(self._tts_lbl)
+
+        lay.addSpacing(6)
+
+        # Video volume
+        lay.addWidget(QLabel("🎬 Video:"))
+        self._vid_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vid_slider.setRange(0, 100)
+        self._vid_slider.setValue(30)
+        self._vid_slider.setFixedWidth(80)
+        self._vid_slider.setStyleSheet(
+            "QSlider::groove:horizontal{height:3px;background:#30363d;border-radius:2px;}"
+            "QSlider::handle:horizontal{width:10px;height:10px;margin:-4px 0;"
+            "background:#0891b2;border-radius:5px;}"
+            "QSlider::sub-page:horizontal{background:#0e7490;border-radius:2px;}"
+        )
+        self._vid_lbl = QLabel("30%")
+        self._vid_lbl.setFixedWidth(34)
+        self._vid_slider.valueChanged.connect(self._on_vid_changed)
+        lay.addWidget(self._vid_slider)
+        lay.addWidget(self._vid_lbl)
+
+        lay.addStretch()
+
+    def set_item(self, item: Optional[MediaItem]):
+        self._item = item
+        if item and item.media_type == "video":
+            self._tts_slider.blockSignals(True)
+            self._vid_slider.blockSignals(True)
+            self._tts_slider.setValue(int(item.tts_volume  * 100))
+            self._vid_slider.setValue(int(item.video_volume * 100))
+            self._tts_lbl.setText(f"{int(item.tts_volume*100)}%")
+            self._vid_lbl.setText(f"{int(item.video_volume*100)}%")
+            self._tts_slider.blockSignals(False)
+            self._vid_slider.blockSignals(False)
+            self.setVisible(True)
+        else:
+            self.setVisible(False)
+
+    def _on_tts_changed(self, v: int):
+        self._tts_lbl.setText(f"{v}%")
+        if self._item:
+            self._item.tts_volume = v / 100.0
+        self.changed.emit()
+
+    def _on_vid_changed(self, v: int):
+        self._vid_lbl.setText(f"{v}%")
+        if self._item:
+            self._item.video_volume = v / 100.0
+        self.changed.emit()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -369,36 +391,40 @@ class SlideDropZone(QFrame):
 
 class SlideSyncTab(QWidget):
     """
-    Tab đồng bộ slide: trái = kịch bản văn bản, phải = danh sách slide + preview.
+    Tab đồng bộ media: trái = kịch bản văn bản, phải = timeline ngang.
     """
-    request_back    = pyqtSignal()          # quay lại MP3 tab
-    request_export  = pyqtSignal(list)      # tiếp tục xuất video → pass slides
+    request_back   = pyqtSignal()
+    request_export = pyqtSignal(list)   # pass media_items
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._slides: List[SlideInfo] = []
-        self._selected_index: Optional[int] = None
-        self._script_text: str = ""
-        self._mp3_path: str = ""
-        self._json_path: str = ""
-        self._card_map: dict[int, SlideThumbnailCard] = {}
-        self._idx_to_pos: dict[int, int] = {}   # slide.index → list position
-        self._load_thread: Optional[SlideLoadThread] = None
+
+        # ── State ─────────────────────────────────────────────────────────
+        self._media_items:   List[MediaItem] = []
+        self._selected_id:   Optional[str]   = None
+        self._script_text:   str             = ""
+        self._mp3_path:      str             = ""
+        self._json_path:     str             = ""
+        self._load_thread:   Optional[SlideLoadThread]   = None
+        self._import_thread: Optional[MediaImportThread] = None
+        self._import_queue:  List[tuple[str, str]]        = []  # [(path, media_type)]
+
         self._sub_settings = {
-            "enabled": True,
+            "enabled":   True,
             "font_size": 20,
-            "color": "Trắng",
-            "style": "Viền đen",
-            "position": 3,
+            "color":     "Trắng",
+            "style":     "Viền đen",
+            "position":  3,
         }
+
         self._build_ui()
 
-
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
     #  PUBLIC API
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
 
-    def load_context(self, script_text: str, mp3_path: str, has_json: bool = True):
+    def load_context(self, script_text: str, mp3_path: str,
+                     has_json: bool = True):
         """Được gọi từ MainWindow khi chuyển sang tab này."""
         self._script_text = script_text
         self._mp3_path    = mp3_path
@@ -416,43 +442,38 @@ class SlideSyncTab(QWidget):
         else:
             self._json_ok_lbl.setVisible(False)
             self._warn_lbl.setText(
-                "⚠️ Thiếu .json timestamps — Đồng bộ Slide OK, nhưng Xuất Video sẽ không chính xác theo giây"
+                "⚠️ Thiếu .json timestamps — slide timing sẽ không chính xác"
             )
 
         self._update_stats()
 
-
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
     #  UI BUILD
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Info bar ────────────────────────────────────────────────────
-        info_bar = self._build_info_bar()
-        root.addWidget(info_bar)
+        root.addWidget(self._build_info_bar())
 
-        # ── Main splitter ───────────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(2)
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([480, 560])
+        splitter.setSizes([480, 580])
         root.addWidget(splitter, 1)
 
-        # ── Action bar ──────────────────────────────────────────────────
         root.addWidget(self._build_action_bar())
 
-    # ── Info bar ─────────────────────────────────────────────────────────
+    # ── Info bar ──────────────────────────────────────────────────────────
 
     def _build_info_bar(self) -> QFrame:
         bar = QFrame()
         bar.setFixedHeight(38)
         bar.setStyleSheet(
-            "QFrame { background-color:#12161c; border-bottom:1px solid #21262d; }"
+            "QFrame{background:#12161c;border-bottom:1px solid #21262d;}"
         )
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
@@ -469,7 +490,7 @@ class SlideSyncTab(QWidget):
         )
         self._json_ok_lbl.setVisible(False)
 
-        self._stats_lbl = QLabel("0 slide · 0 đã gán")
+        self._stats_lbl = QLabel("0 item · 0 slide đã gán")
         self._stats_lbl.setStyleSheet(
             "color:#8b949e; font-size:11px; background:transparent;"
         )
@@ -486,11 +507,11 @@ class SlideSyncTab(QWidget):
         lay.addWidget(self._warn_lbl)
         return bar
 
-    # ── Left panel: kịch bản văn bản ─────────────────────────────────────
+    # ── Left panel ────────────────────────────────────────────────────────
 
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
-        w.setStyleSheet("background-color: #0d1117;")
+        w.setStyleSheet("background:#0d1117;")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(16, 14, 8, 14)
         lay.setSpacing(8)
@@ -508,7 +529,7 @@ class SlideSyncTab(QWidget):
         hdr.addWidget(self._cursor_lbl)
         lay.addLayout(hdr)
 
-        # Text editor
+        # Script editor
         self._editor = SlideScriptEditor()
         self._editor.setReadOnly(False)
         self._editor.setPlaceholderText(
@@ -516,14 +537,14 @@ class SlideSyncTab(QWidget):
             "Bạn có thể chọn vị trí bất kỳ rồi nhấn 'Gán Slide' ở bên phải."
         )
         self._editor.setStyleSheet(
-            "QPlainTextEdit { font-size:13px; line-height:1.7; "
-            "selection-background-color:#4c1d95; }"
+            "QPlainTextEdit{font-size:13px;line-height:1.7;"
+            "selection-background-color:#4c1d95;}"
         )
         self._editor.cursorPositionChanged.connect(self._on_cursor_changed)
         self._editor.textChanged.connect(self._on_text_changed)
         lay.addWidget(self._editor, 1)
 
-        # Assign button (prominent)
+        # Assign buttons
         assign_row = QHBoxLayout()
         self._assign_btn = QPushButton("⬅  Gán Slide đang chọn")
         self._assign_btn.setObjectName("primary")
@@ -547,21 +568,21 @@ class SlideSyncTab(QWidget):
         )
         lay.addWidget(self._assign_hint)
 
-        # ⚙️ Subtitle Settings Panel — gọn 2 hàng
+        # ── Subtitle Settings ─────────────────────────────────────────────
         self._sub_frame = QFrame()
         self._sub_frame.setStyleSheet("""
-            QFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; }
-            QLabel { color: #8b949e; font-size: 11px; font-weight: 600; border: none; }
-            QComboBox, QCheckBox {
-                background-color: #0d1117; border: 1px solid #30363d;
-                border-radius: 4px; padding: 3px 6px; color: #e6edf3; font-size: 12px;
+            QFrame{background:#161b22;border:1px solid #30363d;border-radius:8px;}
+            QLabel{color:#8b949e;font-size:11px;font-weight:600;border:none;}
+            QComboBox,QCheckBox{
+                background:#0d1117;border:1px solid #30363d;
+                border-radius:4px;padding:3px 6px;color:#e6edf3;font-size:12px;
             }
         """)
         sf_lay = QVBoxLayout(self._sub_frame)
         sf_lay.setContentsMargins(10, 6, 10, 6)
         sf_lay.setSpacing(4)
 
-        # Hàng 1: checkbox + cỡ chữ + màu + kiểu
+        # Row 1
         row1 = QHBoxLayout()
         row1.setSpacing(8)
 
@@ -572,48 +593,62 @@ class SlideSyncTab(QWidget):
 
         row1.addWidget(QLabel("Cỡ:"))
         self._sub_size_combo = QComboBox()
-        self._sub_size_combo.addItems(["14", "16", "18", "20", "22", "24", "26", "28", "32"])
-        self._sub_size_combo.setCurrentText(str(self._sub_settings.get("font_size", 20)))
+        self._sub_size_combo.addItems(
+            ["14","16","18","20","22","24","26","28","32"]
+        )
+        self._sub_size_combo.setCurrentText(
+            str(self._sub_settings.get("font_size", 20))
+        )
         self._sub_size_combo.setFixedWidth(52)
-        self._sub_size_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        self._sub_size_combo.currentTextChanged.connect(
+            self._on_sub_settings_changed
+        )
         row1.addWidget(self._sub_size_combo)
 
         row1.addWidget(QLabel("Màu:"))
         self._sub_color_combo = QComboBox()
-        self._sub_color_combo.addItems(["Trắng", "Vàng", "Xanh lá", "Xanh lam"])
-        self._sub_color_combo.setCurrentText(self._sub_settings.get("color", "Trắng"))
+        self._sub_color_combo.addItems(["Trắng","Vàng","Xanh lá","Xanh lam"])
+        self._sub_color_combo.setCurrentText(
+            self._sub_settings.get("color","Trắng")
+        )
         self._sub_color_combo.setFixedWidth(72)
-        self._sub_color_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        self._sub_color_combo.currentTextChanged.connect(
+            self._on_sub_settings_changed
+        )
         row1.addWidget(self._sub_color_combo)
 
         row1.addWidget(QLabel("Kiểu:"))
         self._sub_style_combo = QComboBox()
-        self._sub_style_combo.addItems(["Viền đen", "Nền đen mờ", "Không viền"])
-        self._sub_style_combo.setCurrentText(self._sub_settings.get("style", "Viền đen"))
+        self._sub_style_combo.addItems(["Viền đen","Nền đen mờ","Không viền"])
+        self._sub_style_combo.setCurrentText(
+            self._sub_settings.get("style","Viền đen")
+        )
         self._sub_style_combo.setFixedWidth(90)
-        self._sub_style_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        self._sub_style_combo.currentTextChanged.connect(
+            self._on_sub_settings_changed
+        )
         row1.addWidget(self._sub_style_combo)
         row1.addStretch()
         sf_lay.addLayout(row1)
 
-        # Hàng 2: vị trí slider (compact)
+        # Row 2
         row2 = QHBoxLayout()
         row2.setSpacing(6)
         row2.addWidget(QLabel("Vị trí (% đáy):"))
         self._sub_pos_slider = QSlider(Qt.Orientation.Horizontal)
         self._sub_pos_slider.setMinimum(1)
         self._sub_pos_slider.setMaximum(60)
-        self._sub_pos_slider.setValue(self._sub_settings.get("position", 1))
+        self._sub_pos_slider.setValue(self._sub_settings.get("position",1))
         self._sub_pos_slider.setStyleSheet(
-            "QSlider::groove:horizontal { height:4px; background:#30363d; border-radius:2px; }"
-            "QSlider::handle:horizontal { width:12px; height:12px; margin:-4px 0;"
-            " background:#7c3aed; border-radius:6px; }"
-            "QSlider::sub-page:horizontal { background:#6d28d9; border-radius:2px; }"
+            "QSlider::groove:horizontal{height:4px;background:#30363d;border-radius:2px;}"
+            "QSlider::handle:horizontal{width:12px;height:12px;margin:-4px 0;"
+            "background:#7c3aed;border-radius:6px;}"
+            "QSlider::sub-page:horizontal{background:#6d28d9;border-radius:2px;}"
         )
         self._sub_pos_spin = QSpinBox()
         self._sub_pos_spin.setMinimum(1)
         self._sub_pos_spin.setMaximum(60)
-        self._sub_pos_spin.setValue(self._sub_settings.get("position", 1))
+        self._sub_pos_spin.setValue(self._sub_settings.get("position",1))
         self._sub_pos_spin.setFixedWidth(48)
         self._sub_pos_slider.valueChanged.connect(self._sub_pos_spin.setValue)
         self._sub_pos_spin.valueChanged.connect(self._sub_pos_slider.setValue)
@@ -623,88 +658,114 @@ class SlideSyncTab(QWidget):
         sf_lay.addLayout(row2)
 
         lay.addWidget(self._sub_frame)
-
         return w
 
-    # ── Right panel: danh sách slide + preview ────────────────────────────
+    # ── Right panel ───────────────────────────────────────────────────────
 
     def _build_right_panel(self) -> QWidget:
         w = QWidget()
-        w.setStyleSheet("background-color: #0d1117;")
+        w.setStyleSheet("background:#0d1117;")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(8, 14, 16, 14)
-        lay.setSpacing(8)
+        lay.setContentsMargins(8, 10, 16, 8)
+        lay.setSpacing(6)
 
         # Header
         hdr = QHBoxLayout()
-        lbl = QLabel("🖼  SLIDES")
+        lbl = QLabel("🖼  MEDIA")
         lbl.setObjectName("heading")
-        self._slide_count_lbl = QLabel("0 slide")
-        self._slide_count_lbl.setObjectName("badge")
+        self._item_count_lbl = QLabel("0 item")
+        self._item_count_lbl.setObjectName("badge")
         hdr.addWidget(lbl)
+        hdr.addWidget(self._item_count_lbl)
         hdr.addStretch()
-        hdr.addWidget(self._slide_count_lbl)
+
+        clear_btn = QPushButton("🗑  Xóa tất cả")
+        clear_btn.setObjectName("danger")
+        clear_btn.setFixedHeight(22)
+        clear_btn.setStyleSheet("QPushButton{font-size:10px; padding:2px 8px; font-weight:bold;}")
+        clear_btn.clicked.connect(self._clear_all)
+
+        auto_trans_btn = QPushButton("✦  Tự động chuyển cảnh")
+        auto_trans_btn.setFixedHeight(22)
+        auto_trans_btn.setStyleSheet("QPushButton{font-size:10px; padding:2px 8px; font-weight:bold; background:#1e0f4a; border:1px solid #7c3aed; color:#c4b5fd;}")
+        auto_trans_btn.clicked.connect(self._auto_assign_transitions)
+
+        hdr.addWidget(auto_trans_btn)
+        hdr.addWidget(clear_btn)
         lay.addLayout(hdr)
 
-        # Drop zone import
-        self._drop_zone = SlideDropZone()
+        # Drop zone
+        self._drop_zone = MediaDropZone()
         self._drop_zone.file_dropped.connect(self._on_file_dropped)
         lay.addWidget(self._drop_zone)
 
-        # Progress bar (import)
+        # Progress
         self._import_progress = QProgressBar()
-        self._import_progress.setFixedHeight(5)
+        self._import_progress.setFixedHeight(4)
         self._import_progress.setVisible(False)
         self._import_status = QLabel("")
         self._import_status.setStyleSheet(
-            "color:#8b949e; font-size:11px; background:transparent;"
+            "color:#8b949e; font-size:10px; background:transparent;"
         )
         self._import_status.setVisible(False)
+        self._import_status.setFixedHeight(14)
         lay.addWidget(self._import_progress)
         lay.addWidget(self._import_status)
 
-        # Preview lớn của slide đang chọn
+        # Large preview — flexible height (co giãn với cửa sổ)
         preview_frame = QFrame()
         preview_frame.setObjectName("card")
-        preview_frame.setFixedHeight(180)
+        preview_frame.setMinimumHeight(100)
+        preview_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         p_lay = QVBoxLayout(preview_frame)
-        p_lay.setContentsMargins(6, 6, 6, 6)
-        self._preview_lbl = QLabel("Chọn một slide để xem trước")
+        p_lay.setContentsMargins(6, 4, 6, 4)
+
+        self._preview_lbl = QLabel("Chọn một item để xem trước")
         self._preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_lbl.setStyleSheet(
             "color:#484f58; font-size:12px; background:transparent;"
         )
         self._preview_lbl.setScaledContents(False)
-        p_lay.addWidget(self._preview_lbl)
+        p_lay.addWidget(self._preview_lbl, 1)
 
         self._preview_title = QLabel("")
         self._preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_title.setStyleSheet(
-            "color:#c9d1d9; font-size:12px; font-weight:600; background:transparent;"
+            "color:#c9d1d9; font-size:10px; font-weight:600; background:transparent;"
         )
         p_lay.addWidget(self._preview_title)
-        lay.addWidget(preview_frame)
+        # Stretch factor = 1 → preview nhận toàn bộ không gian thừa
+        lay.addWidget(preview_frame, 1)
 
-        # Scroll area — danh sách thumbnail
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        scroll.setStyleSheet("QScrollArea { border: none; background:#0d1117; }")
+        # Audio mix panel (chỉ hiện khi chọn video)
+        self._audio_mix = AudioMixPanel()
+        self._audio_mix.setVisible(False)
+        lay.addWidget(self._audio_mix)   # stretch=0, fixed 56px khi hiện
 
-        self._list_container = QWidget()
-        self._list_container.setStyleSheet("background:#0d1117;")
-        self._list_layout = QGridLayout(self._list_container)
-        self._list_layout.setContentsMargins(4, 4, 4, 4)
-        self._list_layout.setSpacing(8)
-        scroll.setWidget(self._list_container)
-        lay.addWidget(scroll, 1)
+        self._timeline = TimelineWidget()
+        self._timeline.clip_selected.connect(self._on_clip_selected)
+        self._timeline.clip_removed.connect(self._on_clip_removed)
+        self._timeline.transition_changed.connect(self._on_transition_changed)
+        self._timeline.reordered.connect(self._on_timeline_reordered)
+        lay.addWidget(self._timeline)   # stretch=0 → fixed height từ bên trong
 
-        # Remove all button
-        clear_btn = QPushButton("🗑  Xóa tất cả slide")
-        clear_btn.setObjectName("danger")
-        clear_btn.clicked.connect(self._clear_slides)
-        lay.addWidget(clear_btn)
+        # Slide count info & Clear button in a single row
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        
+        self._slide_count_lbl = QLabel("")
+        self._slide_count_lbl.setStyleSheet(
+            "color:#484f58; font-size:10px; background:transparent;"
+        )
+        self._slide_count_lbl.setFixedHeight(24)
+        bottom_row.addWidget(self._slide_count_lbl)
+        bottom_row.addStretch()
+
+        pass
+        
+        lay.addLayout(bottom_row)
 
         return w
 
@@ -714,7 +775,7 @@ class SlideSyncTab(QWidget):
         bar = QFrame()
         bar.setFixedHeight(56)
         bar.setStyleSheet(
-            "QFrame { background-color:#161b22; border-top:1px solid #21262d; }"
+            "QFrame{background:#161b22;border-top:1px solid #21262d;}"
         )
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
@@ -726,7 +787,6 @@ class SlideSyncTab(QWidget):
         save_btn = QPushButton("💾  Lưu dự án")
         save_btn.clicked.connect(self._save_project)
 
-        # Stats center
         self._action_stats = QLabel("")
         self._action_stats.setStyleSheet(
             "color:#7d8590; font-size:12px; background:transparent;"
@@ -749,155 +809,215 @@ class SlideSyncTab(QWidget):
         lay.addStretch()
         lay.addWidget(preview_btn)
         lay.addWidget(self._next_btn)
-
         return bar
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  SLIDE LOADING
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
+    #  FILE DROP / IMPORT
+    # ──────────────────────────────────────────────────────────────────────
 
-    def _on_file_dropped(self, path: str):
+    def _on_file_dropped(self, path: str, media_type: str):
+        self._import_queue.append((path, media_type))
+        self._process_import_queue()
+
+    def _process_import_queue(self):
+        # Nếu có thread nào đang chạy thì đợi nó xong
         if self._load_thread and self._load_thread.isRunning():
-            QMessageBox.warning(self, "Đang xử lý", "Vui lòng chờ lần import trước xong.")
             return
+        if self._import_thread and self._import_thread.isRunning():
+            return
+
+        if not self._import_queue:
+            return
+
+        path, media_type = self._import_queue.pop(0)
 
         self._import_progress.setVisible(True)
         self._import_progress.setValue(0)
         self._import_status.setVisible(True)
-        self._import_status.setText(f"Đang tải: {Path(path).name}…")
 
-        self._load_thread = SlideLoadThread(path, parent=self)
-        self._load_thread.progress.connect(self._on_import_progress)
-        self._load_thread.finished.connect(self._on_import_finished)
-        self._load_thread.start()
+        if media_type == "slide":
+            self._import_status.setText(f"Đang tải: {Path(path).name}…")
+            self._load_thread = SlideLoadThread(path, parent=self)
+            self._load_thread.progress.connect(self._on_import_progress)
+            self._load_thread.finished.connect(self._on_slides_loaded)
+            self._load_thread.start()
+        else:
+            self._import_status.setText(f"Đang xử lý: {Path(path).name}…")
+            self._import_thread = MediaImportThread(path, media_type, parent=self)
+            self._import_thread.progress.connect(self._on_import_progress)
+            self._import_thread.finished.connect(self._on_media_loaded)
+            self._import_thread.start()
 
     def _on_import_progress(self, pct: int, msg: str):
         self._import_progress.setValue(pct)
         self._import_status.setText(msg)
 
-    def _on_import_finished(self, success: bool, slides: list, error: str):
+    def _on_slides_loaded(self, success: bool, slides: list, error: str):
         self._import_progress.setVisible(False)
         self._import_status.setVisible(False)
-
         if not success:
             QMessageBox.critical(self, "Lỗi import", error)
+            self._process_import_queue()
             return
 
-        self._slides = slides
-        self._rebuild_slide_list()
-        self._update_stats()
+        # Thêm các slide vào cuối timeline
+        existing_nums = {
+            item.display_number
+            for item in self._media_items
+            if item.media_type == "slide"
+        }
+        for slide in slides:
+            item = MediaItem(
+                media_type="slide",
+                path=getattr(slide, "image_path", "") or "",
+                slide_info=slide,
+                duration_sec=5.0,
+            )
+            self._media_items.append(item)
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  SLIDE LIST
-    # ─────────────────────────────────────────────────────────────────────
-
-    def _rebuild_slide_list(self):
-        """Xây lại grid thumbnail từ self._slides."""
-        # Clear layout
-        while self._list_layout.count():
-            item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._card_map.clear()
-        self._selected_index = None
-
-        COLS = 2
-        for idx, slide in enumerate(self._slides):
-            card = SlideThumbnailCard(slide)
-            card.clicked.connect(self._on_slide_selected)
-            card.removed.connect(self._remove_slide)
-            self._card_map[slide.index] = card
-            row, col = divmod(idx, COLS)
-            self._list_layout.addWidget(card, row, col)
-
-        self._slide_count_lbl.setText(f"{len(self._slides)} slide")
-        # Build a fast lookup: slide.index -> list position
-        self._idx_to_pos: dict[int, int] = {s.index: i for i, s in enumerate(self._slides)}
-        
-        # Load saved mapping if it exists
-        if self._mp3_path:
-            slides_json = Path(self._mp3_path).with_suffix(".slides.json")
-            if slides_json.exists():
-                try:
-                    with open(slides_json, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    apply_mapping_from_dict(self._slides, data)
-                except Exception:
-                    pass
-
+        self._rebuild_timeline()
+        self._load_saved_mapping()
         self._refresh_editor_from_slides()
-        self._select_slide(self._slides[0].index if self._slides else None)
+        self._update_stats()
+        self._process_import_queue()
 
-    def _on_slide_selected(self, idx: int):
-        self._select_slide(idx)
-
-    def _select_slide(self, idx: Optional[int]):
-        # Deselect previous
-        if self._selected_index is not None and self._selected_index in self._card_map:
-            self._card_map[self._selected_index].set_selected(False)
-
-        self._selected_index = idx
-
-        if idx is None or idx not in self._card_map:
-            self._preview_lbl.setPixmap(QPixmap())
-            self._preview_lbl.setText("Chọn một slide để xem trước")
-            self._preview_title.setText("")
-            self._assign_btn.setEnabled(False)
-            self._assign_hint.setText("← Chọn 1 slide bên phải trước")
-            self._draw_markers()
+    def _on_media_loaded(self, success: bool, item: object, error: str):
+        self._import_progress.setVisible(False)
+        self._import_status.setVisible(False)
+        if not success:
+            QMessageBox.critical(self, "Lỗi import", error)
+            self._process_import_queue()
             return
+        self._media_items.append(item)
+        self._rebuild_timeline()
+        self._update_stats()
+        self._process_import_queue()
 
-        self._card_map[idx].set_selected(True)
+    # ──────────────────────────────────────────────────────────────────────
+    #  TIMELINE MANAGEMENT
+    # ──────────────────────────────────────────────────────────────────────
 
-        # Get slide by index using the lookup table
-        pos = self._idx_to_pos.get(idx)
-        if pos is None:
-            self._draw_markers()
+    def _rebuild_timeline(self):
+        # Thiết lập display_number trước để các label hiển thị đúng chỉ số!
+        for n, item in enumerate(self._media_items, start=1):
+            item._display_number = n
+
+        self._timeline.set_items(self._media_items)
+        total = len(self._media_items)
+        slides = self._slide_items
+        self._item_count_lbl.setText(f"{total} item")
+        self._slide_count_lbl.setText(
+            f"{len(slides)} slide  ·  "
+            f"{sum(1 for s in slides if s.is_assigned)} đã gán"
+        )
+
+    def _on_clip_selected(self, item_id: str):
+        self._selected_id = item_id
+        item = self._find_item(item_id)
+        if item is None:
             return
-        slide = self._slides[pos]
 
         # Update large preview
-        if slide.image_path and os.path.exists(slide.image_path):
-            pix = QPixmap(slide.image_path)
+        img_path = item.image_path
+        if img_path and os.path.exists(img_path):
+            pix = QPixmap(img_path)
             self._preview_lbl.setPixmap(
-                pix.scaled(self._preview_lbl.width() - 4, 150,
-                           Qt.AspectRatioMode.KeepAspectRatio,
-                           Qt.TransformationMode.SmoothTransformation)
+                pix.scaled(
+                    self._preview_lbl.width() - 4, 110,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
             )
             self._preview_lbl.setText("")
         else:
-            self._preview_lbl.setText(f"📊  Slide {slide.display_number}")
+            icons = {"slide": "📊", "video": "🎬", "image": "🖼️"}
+            self._preview_lbl.setPixmap(QPixmap())
+            self._preview_lbl.setText(
+                icons.get(item.media_type, "?") + "  " + item.display_name
+            )
 
-        title = slide.title or f"Slide {slide.display_number}"
-        self._preview_title.setText(title)
-        self._assign_btn.setEnabled(True)
+        self._preview_title.setText(item.display_name)
+
+        # Audio mix panel
+        self._audio_mix.set_item(item)
+
+        # Assign button — có thể gán bất kỳ loại media nào (slide, video, ảnh)
+        can_assign = True
+        self._assign_btn.setEnabled(can_assign)
         self._assign_hint.setText(
-            f"Slide #{slide.display_number} đã chọn  •  Nhấp vào văn bản bên trái rồi nhấn Gán"
+            f"'{item.display_name}' đã chọn  •  "
+            "Nhấp vào văn bản bên trái rồi nhấn Gán"
         )
+
         self._draw_markers()
 
-    def _remove_slide(self, idx: int):
-        self._slides = [s for s in self._slides if s.index != idx]
-        # Re-index
-        for i, s in enumerate(self._slides):
-            s.index = i
-        self._rebuild_slide_list()
+    def _on_clip_removed(self, item_id: str):
+        self._media_items = [i for i in self._media_items if i.id != item_id]
+        if self._selected_id == item_id:
+            self._selected_id = None
+            self._preview_lbl.setPixmap(QPixmap())
+            self._preview_lbl.setText("Chọn một item để xem trước")
+            self._preview_title.setText("")
+            self._audio_mix.setVisible(False)
+            self._assign_btn.setEnabled(False)
+        self._rebuild_timeline()
+        self._refresh_editor_from_slides()
         self._update_stats()
 
-    def _clear_slides(self):
-        if not self._slides:
+    def _on_transition_changed(self, index: int, trans_type: str,
+                               trans_dur: float):
+        # Đã được cập nhật trực tiếp vào MediaItem trong TimelineWidget
+        pass
+ 
+    def _on_timeline_reordered(self):
+        # Cập nhật số thứ tự hiển thị
+        for n, item in enumerate(self._media_items, start=1):
+            item._display_number = n
+        # Đồng bộ nhãn kịch bản theo thứ tự mới
+        self._refresh_editor_from_slides()
+        self._update_stats()
+
+    def _auto_assign_transitions(self):
+        if len(self._media_items) < 2:
+            QMessageBox.information(self, "Thông báo", "Cần ít nhất 2 clip để gán chuyển cảnh.")
+            return
+
+        from app.models.media_item import TRANSITION_TYPES
+        default_type = "fade"
+        for display, key in TRANSITION_TYPES:
+            if key != "none":
+                default_type = key
+                break
+
+        for item in self._media_items[1:]:
+            item.transition_in = default_type
+            item.transition_dur = 0.5
+
+        self._rebuild_timeline()
+        QMessageBox.information(
+            self, "✓ Hoàn thành",
+            f"Đã tự động gán chuyển cảnh '{default_type}' (0.5s) cho tất cả phân đoạn!"
+        )
+
+    def _clear_all(self):
+        if not self._media_items:
             return
         if QMessageBox.question(
-            self, "Xác nhận", "Xóa toàn bộ slide đã import?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self, "Xác nhận", "Xóa toàn bộ media đã import?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes:
-            self._slides.clear()
-            self._rebuild_slide_list()
+            self._media_items.clear()
+            self._selected_id = None
+            self._rebuild_timeline()
+            self._editor.blockSignals(True)
+            self._editor.setPlainText(self._script_text)
+            self._editor.blockSignals(False)
+            self._on_text_changed()
             self._update_stats()
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  ASSIGN LOGIC
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
+    #  SLIDE ASSIGNMENT (KHÔNG THAY ĐỔI LOGIC CỐT LÕI)
+    # ──────────────────────────────────────────────────────────────────────
 
     def _on_cursor_changed(self):
         cursor = self._editor.textCursor()
@@ -906,100 +1026,93 @@ class SlideSyncTab(QWidget):
         col    = cursor.columnNumber() + 1
         self._cursor_lbl.setText(f"Dòng {block}, Cột {col}  (vị trí {pos})")
 
-    def parse_editor_text(self, editor_text: str) -> tuple[str, dict[int, tuple[int, str]]]:
+    def parse_editor_text(
+        self, editor_text: str
+    ) -> tuple[str, dict[int, tuple[int, str]]]:
         pattern = re.compile(r"\[Slide (\d+)\]")
         matches = list(pattern.finditer(editor_text))
-        
-        clean_parts = []
-        last_idx = 0
-        total_tag_len = 0
-        
-        assignments = {} # slide_index -> clean_pos
-        
+
+        clean_parts    = []
+        last_idx       = 0
+        total_tag_len  = 0
+        assignments    = {}
+
         for match in matches:
             clean_parts.append(editor_text[last_idx:match.start()])
-            clean_pos = match.start() - total_tag_len
-            
-            slide_num = int(match.group(1))
-            slide_idx = slide_num - 1
+            clean_pos  = match.start() - total_tag_len
+            slide_num  = int(match.group(1))
+            slide_idx  = slide_num - 1
             assignments[slide_idx] = clean_pos
-            
-            last_idx = match.end()
-            total_tag_len += (match.end() - match.start())
-            
+            last_idx       = match.end()
+            total_tag_len += match.end() - match.start()
+
         clean_parts.append(editor_text[last_idx:])
         clean_text = "".join(clean_parts)
-        
-        final_assignments = {}
+
+        final = {}
         for idx, clean_pos in assignments.items():
-            snip_start = max(0, clean_pos)
             snip_end = min(len(clean_text), clean_pos + 45)
-            snippet = clean_text[snip_start:snip_end].replace("\n", " ").strip()
-            final_assignments[idx] = (clean_pos, snippet)
-            
-        return clean_text, final_assignments
+            snippet  = clean_text[max(0, clean_pos):snip_end].replace("\n"," ").strip()
+            final[idx] = (clean_pos, snippet)
+
+        return clean_text, final
 
     def _on_text_changed(self):
         raw_text = self._editor.toPlainText()
-        
         clean_text, assignments = self.parse_editor_text(raw_text)
         self._script_text = clean_text
-        
-        # Reset assignments
-        for slide in self._slides:
-            slide.assigned_pos = -1
-            slide.assigned_text = ""
-            
-        # Apply parsed assignments
-        for idx, (pos, snippet) in assignments.items():
-            if 0 <= idx < len(self._slides):
-                self._slides[idx].assigned_pos = pos
-                self._slides[idx].assigned_text = snippet
-                
-        # Draw markers
+
+        slide_items = self._slide_items
+        for item in slide_items:
+            item.assigned_pos  = -1
+            item.assigned_text = ""
+
+        for slide_idx, (pos, snippet) in assignments.items():
+            if 0 <= slide_idx < len(slide_items):
+                slide_items[slide_idx].assigned_pos  = pos
+                slide_items[slide_idx].assigned_text = snippet
+
         self._draw_markers()
-        
-        # Refresh cards
-        for idx, card in self._card_map.items():
-            card.refresh_state()
-            
-        # Update stats
         self._update_stats()
 
     def _refresh_editor_from_slides(self):
-        assigned = [s for s in self._slides if s.is_assigned]
-        assigned.sort(key=lambda s: (s.assigned_pos, s.index), reverse=True)
-        
+        slide_items = [i for i in self._slide_items if i.is_assigned]
+        slide_items.sort(key=lambda s: (s.assigned_pos, s.display_number),
+                         reverse=True)
+
         chars = list(self._script_text)
-        for slide in assigned:
-            pos = min(len(chars), max(0, slide.assigned_pos))
-            tag = f"[Slide {slide.display_number}]"
+        for item in slide_items:
+            pos = min(len(chars), max(0, item.assigned_pos))
+            tag = f"[Slide {item.display_number}]"
             chars.insert(pos, tag)
-            
+
         new_text = "".join(chars)
-        
         self._editor.blockSignals(True)
         self._editor.setPlainText(new_text)
         self._editor.blockSignals(False)
-        
         self._on_text_changed()
 
     def _draw_markers(self):
-        """Tô màu các tag [Slide X] trong editor."""
         extra_selections = []
-        text = self._editor.toPlainText()
+        text    = self._editor.toPlainText()
         pattern = re.compile(r"\[Slide (\d+)\]")
-        
-        ranges = []
+        ranges  = []
+
+        slide_items = self._slide_items
+
         for match in pattern.finditer(text):
             slide_num = int(match.group(1))
             slide_idx = slide_num - 1
-            is_sel = (self._selected_index == slide_idx)
-            
+
+            # Tìm selected slide
+            sel_item = self._find_item(self._selected_id)
+            is_sel = (
+                sel_item is not None
+                and sel_item.media_type == "slide"
+                and sel_item.display_number == slide_num
+            )
             ranges.append((match.start(), match.end(), is_sel, slide_num))
-            
-            # Make the original text background and text color match the dark editor theme,
-            # so the underlying raw text is completely invisible under our custom painted pill.
+
             fmt = QTextCharFormat()
             fmt.setForeground(QColor("#0d1117"))
             fmt.setBackground(QColor("#0d1117"))
@@ -1017,94 +1130,61 @@ class SlideSyncTab(QWidget):
         self._editor.setExtraSelections(extra_selections)
 
     def _assign_slide(self):
-        if self._selected_index is None:
+        item = self._find_item(self._selected_id)
+        if item is None:
             return
 
-        card = self._card_map.get(self._selected_index)
-        if card is None:
-            return
-        slide = card.slide
-
-        tag_str = f"[Slide {slide.display_number}]"
-
+        tag_str = f"[Slide {item.display_number}]"
         self._editor.blockSignals(True)
-        
-        # Xóa tag cũ nếu có
         cursor = self._editor.textCursor()
         doc = self._editor.document()
         find_cursor = doc.find(tag_str)
         if not find_cursor.isNull():
             find_cursor.removeSelectedText()
-            
-        # Chèn tag mới vào vị trí con trỏ hiện tại
+        cursor = self._editor.textCursor()
         cursor.insertText(tag_str)
-        
         self._editor.blockSignals(False)
 
-        # Cập nhật
         self._on_text_changed()
 
-        # Flash feedback
         orig = self._assign_btn.text()
         self._assign_btn.setText("✓  Đã gán!")
         self._assign_btn.setEnabled(False)
-        from PyQt6.QtCore import QTimer
         QTimer.singleShot(800, lambda: (
             self._assign_btn.setText(orig),
             self._assign_btn.setEnabled(True),
         ))
 
-    def _unassign_slide(self, idx: int):
-        if idx >= len(self._slides):
-            return
-        slide = self._slides[idx]
-        tag_str = f"[Slide {slide.display_number}]"
-        
-        self._editor.blockSignals(True)
-        doc = self._editor.document()
-        find_cursor = doc.find(tag_str)
-        if not find_cursor.isNull():
-            find_cursor.removeSelectedText()
-        self._editor.blockSignals(False)
-        
-        self._on_text_changed()
-
     def _auto_assign_slides(self):
-        if not self._slides:
+        slide_items = self._slide_items
+        if not slide_items:
             return
-            
-        # Cảnh báo người dùng trước khi thực hiện
+
         reply = QMessageBox.question(
-            self,
-            "⚡ Tự động gán Slide",
-            "Hệ thống sẽ tự động phân bổ tất cả slide vào các vị trí trong kịch bản.\n"
-            "Các gán cũ (nếu có) sẽ bị ghi đè.\n\n"
-            "Hãy kiểm tra và điều chỉnh lại sau khi gán tự động kết thúc.\n"
-            "Bạn có muốn tiếp tục không?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self, "⚡ Tự động gán Slide",
+            "Hệ thống sẽ tự động phân bổ tất cả slide vào kịch bản.\n"
+            "Các gán cũ sẽ bị ghi đè.\n\nTiếp tục?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        text = self._script_text
-        n = len(self._slides)
+        text     = self._script_text
+        n        = len(slide_items)
         text_len = len(text)
-        
+
         if n == 1:
-            self._slides[0].assigned_pos = 0
+            slide_items[0].assigned_pos = 0
             self._refresh_editor_from_slides()
             return
-            
-        # 1. Slide đầu tiên ở 0
-        # 2. Slide cuối cùng ở dấu chấm cuối
-        last_dot = text.rfind('.')
+
+        last_dot = text.rfind(".")
         if last_dot == -1:
             last_dot = text_len
 
-        # 3. Phân bổ các slide ở giữa
         from app.core.mp3_exporter import split_into_sentences
         sentences = split_into_sentences(text)
-        
+
         sentence_starts = []
         char_cursor = 0
         for sent in sentences:
@@ -1114,74 +1194,157 @@ class SlideSyncTab(QWidget):
             sentence_starts.append(char_start)
             char_cursor = char_start + len(sent)
 
-        # Lọc các câu hợp lệ nằm trước dấu chấm cuối
-        valid_starts = [pos for pos in sentence_starts if pos < last_dot]
-        
-        # Reset assignments
-        for s in self._slides:
-            s.assigned_pos = -1
-            s.assigned_text = ""
+        valid_starts = [p for p in sentence_starts if p < last_dot]
 
-        # Gán slide đầu
-        self._slides[0].assigned_pos = 0
-        
-        # Gán slide giữa (1 to n-2)
+        for item in slide_items:
+            item.assigned_pos  = -1
+            item.assigned_text = ""
+
+        slide_items[0].assigned_pos = 0
         for i in range(1, n - 1):
             if len(valid_starts) >= n - 1:
-                # Đủ câu, gán theo câu
                 sent_idx = int(i * len(valid_starts) / (n - 1))
                 pos = valid_starts[sent_idx]
             else:
-                # Thiếu câu, gán theo ký tự và snap về đầu từ
                 pos = int(i * last_dot / (n - 1))
                 while pos > 0 and not text[pos - 1].isspace():
                     pos -= 1
                 pos = min(pos, last_dot)
-            self._slides[i].assigned_pos = pos
+            slide_items[i].assigned_pos = pos
 
-        # Gán slide cuối
-        self._slides[-1].assigned_pos = last_dot
-        
-        # Cập nhật ngược lại vào editor
+        slide_items[-1].assigned_pos = last_dot
         self._refresh_editor_from_slides()
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
+    #  HELPERS
+    # ──────────────────────────────────────────────────────────────────────
+
+    @property
+    def _slide_items(self) -> List[MediaItem]:
+        """Trả về tất cả MediaItem trong timeline để gán vào kịch bản."""
+        # Đánh lại display_number theo thứ tự xuất hiện
+        for n, item in enumerate(self._media_items, start=1):
+            item._display_number = n
+        return self._media_items
+
+    def _find_item(self, item_id: Optional[str]) -> Optional[MediaItem]:
+        if not item_id:
+            return None
+        for item in self._media_items:
+            if item.id == item_id:
+                return item
+        return None
+
+    def _load_saved_mapping(self):
+        """Tải mapping đã lưu từ .slides.json nếu có."""
+        if not self._mp3_path:
+            return
+        slides_json = Path(self._mp3_path).with_suffix(".slides.json")
+        if slides_json.exists():
+            try:
+                with open(slides_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                slide_infos = [i.slide_info for i in self._media_items
+                               if i.slide_info]
+                apply_mapping_from_dict(slide_infos, data)
+                # Đồng bộ lại assigned_pos vào MediaItem
+                for item in self._media_items:
+                    if item.slide_info:
+                        item.assigned_pos  = getattr(
+                            item.slide_info, "assigned_pos", -1)
+                        item.assigned_text = getattr(
+                            item.slide_info, "assigned_text", "")
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────────────────────────────
     #  STATS
-    # ─────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
 
     def _update_stats(self):
-        total    = len(self._slides)
-        assigned = sum(1 for s in self._slides if s.is_assigned)
-        unassigned = total - assigned
+        total     = len(self._media_items)
+        slides    = self._slide_items
+        assigned  = sum(1 for s in slides if s.is_assigned)
+        unassigned= len(slides) - assigned
 
-        self._stats_lbl.setText(f"{total} slide  ·  {assigned} đã gán")
-        self._slide_count_lbl.setText(f"{total} slide")
-        self._action_stats.setText(
-            f"✅ {assigned} đã gán  •  ⚠️ {unassigned} chưa gán"
-            if unassigned > 0 else
-            f"✅ Tất cả {total} slide đã được gán"
+        self._stats_lbl.setText(
+            f"{total} item · {assigned}/{len(slides)} slide đã gán"
+        )
+        self._item_count_lbl.setText(f"{total} item")
+        self._slide_count_lbl.setText(
+            f"{len(slides)} slide  ·  {assigned} đã gán"
         )
 
-        if total > 0 and unassigned > 0:
+        if unassigned > 0:
+            self._action_stats.setText(
+                f"✅ {assigned} đã gán  •  ⚠️ {unassigned} slide chưa gán"
+            )
+        else:
+            self._action_stats.setText(
+                f"✅ Tất cả {len(slides)} slide đã gán" if slides
+                else f"🎬 {total} media trong timeline"
+            )
+
+        self._auto_btn.setEnabled(
+            bool(slides) and bool(self._editor.toPlainText().strip())
+        )
+
+        if unassigned > 0:
             self._warn_lbl.setText(f"⚠  Còn {unassigned} slide chưa gán vị trí")
         else:
             self._warn_lbl.setText("")
 
-        self._auto_btn.setEnabled(total > 0 and bool(self._editor.toPlainText().strip()))
+    # ──────────────────────────────────────────────────────────────────────
+    #  SUBTITLE SETTINGS
+    # ──────────────────────────────────────────────────────────────────────
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  SAVE / EXPORT
-    # ─────────────────────────────────────────────────────────────────────
+    def _on_sub_settings_changed(self):
+        self._sub_settings["enabled"]   = self._sub_enable_cb.isChecked()
+        self._sub_settings["font_size"] = int(self._sub_size_combo.currentText())
+        self._sub_settings["color"]     = self._sub_color_combo.currentText()
+        self._sub_settings["style"]     = self._sub_style_combo.currentText()
+        self._sub_settings["position"]  = self._sub_pos_slider.value()
+
+    def _sync_sub_controls(self):
+        for w in [self._sub_enable_cb, self._sub_size_combo,
+                  self._sub_color_combo, self._sub_style_combo,
+                  self._sub_pos_slider, self._sub_pos_spin]:
+            w.blockSignals(True)
+
+        self._sub_enable_cb.setChecked(
+            self._sub_settings.get("enabled", True))
+        self._sub_size_combo.setCurrentText(
+            str(self._sub_settings.get("font_size", 20)))
+        self._sub_color_combo.setCurrentText(
+            self._sub_settings.get("color", "Trắng"))
+        self._sub_style_combo.setCurrentText(
+            self._sub_settings.get("style", "Viền đen"))
+        self._sub_pos_slider.setValue(
+            self._sub_settings.get("position", 5))
+        self._sub_pos_spin.setValue(
+            self._sub_settings.get("position", 5))
+
+        for w in [self._sub_enable_cb, self._sub_size_combo,
+                  self._sub_color_combo, self._sub_style_combo,
+                  self._sub_pos_slider, self._sub_pos_spin]:
+            w.blockSignals(False)
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  SAVE / PREVIEW / EXPORT
+    # ──────────────────────────────────────────────────────────────────────
 
     def _save_project(self):
         if not self._mp3_path:
-            QMessageBox.warning(self, "Chưa có MP3", "Cần xuất MP3 trước khi lưu dự án.")
+            QMessageBox.warning(self, "Chưa có MP3",
+                                "Cần xuất MP3 trước khi lưu dự án.")
             return
-        data = mapping_to_dict(self._slides)
+
+        slide_infos = [i.slide_info for i in self._media_items
+                       if i.slide_info]
+        data = mapping_to_dict(slide_infos)
         data["script_text"] = self._script_text
         data["mp3_path"]    = self._mp3_path
 
-        # Lưu cùng thư mục với MP3, đặt tên theo MP3
         default_path = str(Path(self._mp3_path).with_suffix(".slides.json"))
         path, _ = QFileDialog.getSaveFileName(
             self, "Lưu dự án", default_path,
@@ -1196,82 +1359,62 @@ class SlideSyncTab(QWidget):
         QMessageBox.information(self, "✓ Đã lưu", f"Dự án lưu tại:\n{path}")
 
     def _preview_video(self):
-        if not self._slides:
-            QMessageBox.warning(self, "Chưa có slide", "Vui lòng import slide trước.")
+        if not self._media_items:
+            QMessageBox.warning(self, "Chưa có media",
+                                "Vui lòng import media trước.")
             return
         if not self._mp3_path:
             QMessageBox.warning(self, "Chưa có MP3", "Chưa có file audio.")
             return
+
+        # Lấy slides (backward compat với dialog cũ)
+        slides = [i.slide_info for i in self._media_items if i.slide_info]
+
         from app.ui.video_export_dialog import PreviewVideoDialog
         dlg = PreviewVideoDialog(
-            slides=self._slides,
+            slides=slides,
             script_text=self._script_text,
             mp3_path=self._mp3_path,
             json_path=self._json_path,
             sub_settings=self._sub_settings,
+            media_items=self._media_items,
             parent=self,
         )
         dlg.exec()
-        # Sync back changes (if they modified them inside the preview dialog)
         self._sync_sub_controls()
 
-    def _on_sub_settings_changed(self):
-        self._sub_settings["enabled"]   = self._sub_enable_cb.isChecked()
-        self._sub_settings["font_size"] = int(self._sub_size_combo.currentText())
-        self._sub_settings["color"]     = self._sub_color_combo.currentText()
-        self._sub_settings["style"]     = self._sub_style_combo.currentText()
-        self._sub_settings["position"]  = self._sub_pos_slider.value()
-
-    def _sync_sub_controls(self):
-        self._sub_enable_cb.blockSignals(True)
-        self._sub_size_combo.blockSignals(True)
-        self._sub_color_combo.blockSignals(True)
-        self._sub_style_combo.blockSignals(True)
-        self._sub_pos_slider.blockSignals(True)
-        self._sub_pos_spin.blockSignals(True)
-        
-        self._sub_enable_cb.setChecked(self._sub_settings.get("enabled", True))
-        self._sub_size_combo.setCurrentText(str(self._sub_settings.get("font_size", 20)))
-        self._sub_color_combo.setCurrentText(self._sub_settings.get("color", "Trắng"))
-        self._sub_style_combo.setCurrentText(self._sub_settings.get("style", "Viền đen"))
-        self._sub_pos_slider.setValue(self._sub_settings.get("position", 5))
-        self._sub_pos_spin.setValue(self._sub_settings.get("position", 5))
-        
-        self._sub_enable_cb.blockSignals(False)
-        self._sub_size_combo.blockSignals(False)
-        self._sub_color_combo.blockSignals(False)
-        self._sub_style_combo.blockSignals(False)
-        self._sub_pos_slider.blockSignals(False)
-        self._sub_pos_spin.blockSignals(False)
-
     def _go_export(self):
-        if not self._slides:
-            QMessageBox.warning(self, "Chưa có slide", "Vui lòng import slide trước.")
+        if not self._media_items:
+            QMessageBox.warning(self, "Chưa có media",
+                                "Vui lòng import media trước.")
             return
         if not self._mp3_path:
             QMessageBox.warning(self, "Chưa có MP3", "Chưa có file audio.")
             return
 
-        unassigned = [s for s in self._slides if not s.is_assigned]
+        slide_items = self._slide_items
+        unassigned  = [s for s in slide_items if not s.is_assigned]
         if unassigned:
             reply = QMessageBox.question(
                 self, "Còn slide chưa gán",
-                f"Có {len(unassigned)} slide chưa được gán vị trí trong kịch bản.\n"
-                "Những slide này sẽ được bỏ qua khi xuất video.\n\n"
-                "Tiếp tục xuất không?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                f"Có {len(unassigned)} slide chưa gán vị trí.\n"
+                "Những slide này sẽ được bỏ qua khi xuất video.\n\nTiếp tục?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.No:
                 return
 
         from app.ui.video_export_dialog import ExportVideoDialog
+        # Lấy slides để truyền cho dialog (backward compat)
+        slides = [i.slide_info for i in self._media_items if i.slide_info]
+
         dlg = ExportVideoDialog(
-            slides=self._slides,
+            slides=slides,
             script_text=self._script_text,
             mp3_path=self._mp3_path,
             json_path=self._json_path,
             sub_settings=self._sub_settings,
+            media_items=self._media_items,    # NEW: truyền cả media_items
             parent=self,
         )
         dlg.exec()
-

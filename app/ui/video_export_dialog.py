@@ -11,11 +11,12 @@ from typing import List, Optional
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QUrl
 from PyQt6.QtGui import QPixmap, QColor, QPainter, QFont, QFontMetrics, QTextLayout
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
-    QComboBox, QCheckBox, QSlider, QSpinBox,
+    QComboBox, QCheckBox, QSlider, QSpinBox, QGridLayout,
 )
 
 from app.core.slide_processor import SlideInfo
@@ -90,29 +91,44 @@ class ExportVideoThread(QThread):
     finished = pyqtSignal(bool, str)   # success, error/path
 
     def __init__(self, slides, script_text, mp3_path, json_path,
-                 output_path, resolution, sub_settings=None, parent=None):
+                 output_path, resolution, sub_settings=None,
+                 media_items=None, parent=None):
         super().__init__(parent)
-        self.slides      = slides
-        self.script_text = script_text
-        self.mp3_path    = mp3_path
-        self.json_path   = json_path
-        self.output_path = output_path
-        self.resolution  = resolution
+        self.slides       = slides
+        self.script_text  = script_text
+        self.mp3_path     = mp3_path
+        self.json_path    = json_path
+        self.output_path  = output_path
+        self.resolution   = resolution
         self.sub_settings = sub_settings
+        self.media_items  = media_items  # None → dùng export_video cũ
 
     def run(self):
         try:
-            from app.core.video_exporter import export_video
-            out = export_video(
-                self.slides,
-                self.script_text,
-                self.mp3_path,
-                self.json_path,
-                self.output_path,
-                resolution=self.resolution,
-                sub_settings=self.sub_settings,
-                progress_cb=self.progress.emit,
-            )
+            if self.media_items:
+                from app.core.video_exporter import export_video_with_media
+                out = export_video_with_media(
+                    self.media_items,
+                    self.script_text,
+                    self.mp3_path,
+                    self.json_path,
+                    self.output_path,
+                    resolution=self.resolution,
+                    sub_settings=self.sub_settings,
+                    progress_cb=self.progress.emit,
+                )
+            else:
+                from app.core.video_exporter import export_video
+                out = export_video(
+                    self.slides,
+                    self.script_text,
+                    self.mp3_path,
+                    self.json_path,
+                    self.output_path,
+                    resolution=self.resolution,
+                    sub_settings=self.sub_settings,
+                    progress_cb=self.progress.emit,
+                )
             self.finished.emit(True, out)
         except Exception as exc:
             self.finished.emit(False, str(exc))
@@ -132,14 +148,16 @@ class ExportVideoDialog(QDialog):
         mp3_path: str,
         json_path: str,
         sub_settings: dict = None,
+        media_items=None,    # List[MediaItem] — dùng export mới khi có
         parent=None,
     ):
         super().__init__(parent)
-        self.slides      = slides
-        self.script_text = script_text
-        self.mp3_path    = mp3_path
-        self.json_path   = json_path
+        self.slides       = slides
+        self.script_text  = script_text
+        self.mp3_path     = mp3_path
+        self.json_path    = json_path
         self.sub_settings = sub_settings
+        self.media_items  = media_items
         self._thread: Optional[ExportVideoThread] = None
 
         self.setWindowTitle("Xuất Video MP4")
@@ -234,7 +252,7 @@ class ExportVideoDialog(QDialog):
         # Resolution
         lay.addWidget(self._lbl("Độ phân giải:"))
         self._res_combo = QComboBox()
-        for label in ["1280 × 720  (HD)", "1920 × 1080  (Full HD)", "854 × 480  (SD)"]:
+        for label in ["1920 × 1080  (Full HD)", "1280 × 720  (HD)", "854 × 480  (SD)"]:
             self._res_combo.addItem(label)
         lay.addWidget(self._res_combo)
 
@@ -284,10 +302,13 @@ class ExportVideoDialog(QDialog):
             if not path.lower().endswith(".mp4"):
                 path += ".mp4"
             self._out_edit.setText(path)
+            from PyQt6.QtCore import QSettings
+            settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+            settings.setValue("last_export_dir", str(Path(path).parent))
 
     def _resolution(self) -> tuple[int, int]:
         idx = self._res_combo.currentIndex()
-        return [(1280, 720), (1920, 1080), (854, 480)][idx]
+        return [(1920, 1080), (1280, 720), (854, 480)][idx]
 
     def _start_export(self):
         output = self._out_edit.text().strip()
@@ -309,6 +330,7 @@ class ExportVideoDialog(QDialog):
             self.mp3_path, json_path,
             output, self._resolution(),
             sub_settings=self.sub_settings,
+            media_items=getattr(self, "media_items", None),
             parent=self,
         )
         self._thread.progress.connect(self._on_progress)
@@ -361,6 +383,7 @@ class PreviewVideoDialog(QDialog):
         mp3_path: str,
         json_path: str,
         sub_settings: dict = None,
+        media_items=None,    # List[MediaItem]
         parent=None,
     ):
         super().__init__(parent)
@@ -368,6 +391,7 @@ class PreviewVideoDialog(QDialog):
         self.script_text = script_text
         self.mp3_path    = mp3_path
         self.json_path   = json_path
+        self.media_items = media_items
         self.sub_settings = sub_settings if sub_settings is not None else {
             "enabled": True, "font_size": 20, "color": "Trắng", "style": "Viền đen", "position": 3
         }
@@ -393,9 +417,8 @@ class PreviewVideoDialog(QDialog):
             QPushButton#primary { background:#6d28d9; color:#fff; border:none; }
             QPushButton#primary:hover { background:#7c3aed; }
         """)
-        self._build_ui()
         
-        # Cấu hình âm thanh
+        # Cấu hình âm thanh TTS chính
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
@@ -406,6 +429,7 @@ class PreviewVideoDialog(QDialog):
         self._player.positionChanged.connect(self._on_player_position_changed)
         self._player.playbackStateChanged.connect(self._on_player_state_changed)
 
+        self._build_ui()
         self._load_timeline()
 
     def _build_ui(self):
@@ -429,8 +453,6 @@ class PreviewVideoDialog(QDialog):
         self._sub_overlay.setWordWrap(True)
         self._sub_overlay.setVisible(False)
         
-        main_row.addWidget(self._img_lbl, 1)
-
         # Bảng cấu hình phụ đề (Subtitle Panel)
         self._settings_panel = QFrame()
         self._settings_panel.setFixedWidth(200)
@@ -503,6 +525,7 @@ class PreviewVideoDialog(QDialog):
         s_lay.addLayout(pos_row)
 
         s_lay.addStretch()
+        main_row.addWidget(self._img_lbl, 1)
         main_row.addWidget(self._settings_panel)
         lay.addLayout(main_row, 1)
 
@@ -697,14 +720,18 @@ class PreviewVideoDialog(QDialog):
                     raw_sentences = json_data.get("sentences", [])
                     self._sentences = split_sentences_into_single_lines(raw_sentences, max_chars=45)
 
+            # Ưu tiên sử dụng media_items có cấu trúc đầy đủ
+            items_to_use = self.media_items if self.media_items else self.slides
+
             if json_data:
+                assigned = [s for s in items_to_use if s.is_assigned]
                 self._timeline = build_slide_timeline(
-                    self.slides, self.script_text, json_data
+                    assigned, self.script_text, json_data
                 )
             else:
-                assigned = [s for s in self.slides if s.is_assigned]
+                assigned = [s for s in items_to_use if s.is_assigned]
                 if not assigned:
-                    assigned = self.slides
+                    assigned = items_to_use
                 dur = 5.0
                 from app.core.video_exporter import SlideTimedEntry
                 self._timeline = [
@@ -712,7 +739,8 @@ class PreviewVideoDialog(QDialog):
                     for i, s in enumerate(assigned)
                 ]
         except Exception as e:
-            assigned = [s for s in self.slides if s.is_assigned] or self.slides
+            items_to_use = self.media_items if self.media_items else self.slides
+            assigned = [s for s in items_to_use if s.is_assigned] or items_to_use
             from app.core.video_exporter import SlideTimedEntry
             dur = 5.0
             self._timeline = [
@@ -727,12 +755,19 @@ class PreviewVideoDialog(QDialog):
         if not self._timeline:
             self._img_lbl.setText("Chưa có slide nào được gán.")
             return
-
+ 
         entry = self._timeline[self._cur_idx]
         slide = entry.slide
-
-        if slide.image_path and os.path.exists(slide.image_path):
-            pix = QPixmap(slide.image_path)
+ 
+        # Tìm đường dẫn ảnh thu nhỏ hoặc ảnh slide
+        img_path = (
+            getattr(slide, "thumbnail_path", "") or
+            getattr(slide, "image_path", "") or
+            getattr(slide, "path", "")
+        )
+        
+        if img_path and os.path.exists(img_path) and not img_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            pix = QPixmap(img_path)
             self._img_lbl.setPixmap(
                 pix.scaled(self._img_lbl.width() or 760,
                            self._img_lbl.height() or 380,
@@ -741,10 +776,12 @@ class PreviewVideoDialog(QDialog):
             )
             self._img_lbl.setText("")
         else:
-            self._img_lbl.setText(f"📊  Slide {slide.display_number}")
+            self._img_lbl.setPixmap(QPixmap())
+            self._img_lbl.setText(f"🎥  {slide.display_name}")
 
-        title = slide.title or f"Slide {slide.display_number}"
-        self._slide_info.setText(f"Slide {slide.display_number}  —  {title}")
+        title = getattr(slide, "title", "") if hasattr(slide, "title") else ""
+        title_str = f" — {title}" if title else ""
+        self._slide_info.setText(f"{slide.display_name}{title_str}")
         self._counter_lbl.setText(f"{self._cur_idx + 1} / {len(self._timeline)}")
 
     def _show_current_time(self, sec):
@@ -797,7 +834,7 @@ class PreviewVideoDialog(QDialog):
             self._reposition_sub_overlay()
         else:
             self._sub_overlay.setVisible(False)
-
+ 
     def _on_player_state_changed(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self._playing = True
@@ -848,6 +885,7 @@ class PreviewVideoDialog(QDialog):
     def closeEvent(self, event):
         try:
             self._player.stop()
+            self._video_player.stop()
             # Ngắt các kết nối signal để tránh callback chạy khi các widget đang bị hủy
             try:
                 self._player.positionChanged.disconnect()
@@ -862,9 +900,14 @@ class PreviewVideoDialog(QDialog):
             self._player.setAudioOutput(None)
             self._player.setSource(QUrl())
             
+            self._video_player.setAudioOutput(None)
+            self._video_player.setSource(QUrl())
+            
             # Hủy đối tượng an toàn trong event loop của Qt
             self._player.deleteLater()
             self._audio_output.deleteLater()
+            self._video_player.deleteLater()
+            self._video_audio.deleteLater()
         except Exception:
             pass
         super().closeEvent(event)

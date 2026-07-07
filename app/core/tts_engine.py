@@ -267,7 +267,7 @@ class TTSEngine:
                     break
                 except Exception as e:
                     last_err = e
-                    print(f"[WARNING] Edge-TTS failed attempt {attempt+1}: {e}. Retrying in {delay}s...")
+                    print(f"[THÔNG BÁO] Kết nối Edge-TTS bị chậm/lỗi nhẹ (Đang tự động thử lại lần {attempt+1}/{len(backoffs)} sau {delay}s)...")
                     time.sleep(delay)
 
             if not success:

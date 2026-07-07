@@ -118,22 +118,26 @@ def _pptx_via_com_export_slides(
 ) -> List[SlideInfo]:
     """Dùng PowerPoint COM ExportAsFixedFormat hoặc Export(ppSaveAsPNG)."""
     import comtypes.client  # type: ignore
+    import comtypes
+
+    try:
+        comtypes.CoInitialize()
+    except Exception:
+        pass
 
     out_dir = _temp_dir()
     pptx_abs = str(Path(pptx_path).resolve())
 
     report(5, "Kết nối PowerPoint…")
-    ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
-    ppt_app.Visible = 1  # phải visible để render đúng
-
+    ppt_app = None
     try:
+        ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
+        ppt_app.Visible = 1  # phải visible để render đúng
         prs = ppt_app.Presentations.Open(pptx_abs, ReadOnly=True, WithWindow=False)
         slide_count = prs.Slides.Count
         report(10, f"Đang render {slide_count} slide…")
 
         # Export từng slide dưới dạng PNG
-        # ppSaveAsPNG = 18
-        PNG_FORMAT = 18
         WIDTH  = 1280
         HEIGHT = 720
 
@@ -151,8 +155,13 @@ def _pptx_via_com_export_slides(
 
         prs.Close()
     finally:
+        if ppt_app:
+            try:
+                ppt_app.Quit()
+            except Exception:
+                pass
         try:
-            ppt_app.Quit()
+            comtypes.CoUninitialize()
         except Exception:
             pass
 
@@ -166,23 +175,34 @@ def _pptx_via_com_to_pdf(
 ) -> List[SlideInfo]:
     """Convert PPTX → PDF qua COM, rồi render PDF bằng PyMuPDF."""
     import comtypes.client  # type: ignore
+    import comtypes
+
+    try:
+        comtypes.CoInitialize()
+    except Exception:
+        pass
 
     pdf_path = os.path.join(_temp_dir(), "slides.pdf")
     pptx_abs = str(Path(pptx_path).resolve())
     pdf_abs  = str(Path(pdf_path).resolve())
 
     report(5, "Kết nối PowerPoint để convert PDF…")
-    ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
-    ppt_app.Visible = 1
-
+    ppt_app = None
     try:
+        ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
+        ppt_app.Visible = 1
         prs = ppt_app.Presentations.Open(pptx_abs, ReadOnly=True, WithWindow=False)
         # ppSaveAsPDF = 32
         prs.SaveAs(pdf_abs, 32)
         prs.Close()
     finally:
+        if ppt_app:
+            try:
+                ppt_app.Quit()
+            except Exception:
+                pass
         try:
-            ppt_app.Quit()
+            comtypes.CoUninitialize()
         except Exception:
             pass
 

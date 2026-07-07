@@ -10,6 +10,14 @@ from app.ui.main_window import MainWindow
 
 
 def main():
+    # Suppress harmless FFmpeg/MP3 and QFont console warnings
+    from PyQt6.QtCore import qInstallMessageHandler
+    def message_handler(msg_type, context, msg_string):
+        if any(term in msg_string for term in ["mp3float", "timestamps for skipped samples", "setFontSize", "Point size <= 0"]):
+            return
+        sys.stderr.write(f"Qt Msg: {msg_string}\n")
+    qInstallMessageHandler(message_handler)
+
     app = QApplication(sys.argv)
     app.setApplicationName("KathTTS Studio")
     app.setOrganizationName("KathSlideToVideo")

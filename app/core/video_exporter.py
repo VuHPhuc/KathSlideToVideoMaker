@@ -102,6 +102,115 @@ def char_pos_to_ms(char_pos: int, mapping: List[tuple[int, int, int]]) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  SUBTITLE UTILS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def split_sentences_into_single_lines(sentences: list, max_chars: int = 45) -> list:
+    """
+    Tách các câu dài thành các câu phụ đề ngắn có độ dài tối đa max_chars (phù hợp hiển thị 1 dòng).
+    Sử dụng thông tin timestamps cấp độ từ (word-level timestamps) từ Whisper nếu có,
+    ngược lại nội suy tuyến tính dựa trên vị trí từ.
+
+    Quy tắc bổ sung:
+    1. Tự động ngắt dòng ngay sau dấu phẩy (,), dấu chấm phẩy (;), dấu hai chấm (:) hoặc dấu kết câu
+       nếu độ dài của phân đoạn hiện tại đã đạt tối thiểu 12 ký tự hoặc có ít nhất 2 từ.
+    2. Nếu đoạn văn bản còn lại của câu chỉ còn tối đa 2 từ, gộp tất cả chúng vào phân đoạn hiện tại
+       để tránh tạo ra thẻ phụ đề bị mồ côi (chỉ chứa 1 hoặc 2 từ đơn độc ở cuối câu).
+    """
+    new_sents = []
+    idx_counter = 0
+    for sent in sentences:
+        text = sent.get("text", "").strip()
+        start_ms = sent.get("start_ms", 0)
+        end_ms = sent.get("end_ms", start_ms + 1000)
+        words_ts = sent.get("words", []) # Word timestamps from Whisper
+        
+        if not text:
+            continue
+            
+        raw_words = text.split()
+        if not raw_words:
+            continue
+            
+        # Gom các từ thành các dòng con
+        chunks = []
+        current_chunk = []
+        current_len = 0
+        total_raw_words = len(raw_words)
+        
+        for idx, rw in enumerate(raw_words):
+            remaining_words = total_raw_words - idx
+            # Nếu chỉ còn lại <= 2 từ trong câu, ép buộc gộp vào dòng hiện tại để tránh từ mồ côi
+            force_no_split = (remaining_words <= 2)
+            
+            add_len = len(rw) + (1 if current_chunk else 0)
+            
+            # Kiểm tra xem từ trước đó có kết thúc bằng dấu câu đặc biệt không
+            prev_ended_with_punctuation = False
+            if current_chunk and not force_no_split:
+                prev_w = current_chunk[-1]
+                clean_prev = prev_w.rstrip('*_"\'')
+                # Chỉ ngắt khi dòng đã có độ dài tối thiểu để tránh các từ mồi như "Ví dụ," bị ngắt riêng
+                if len(current_chunk) >= 2 or current_len >= 12:
+                    if clean_prev.endswith((',', ';', ':', '.', '?', '!')):
+                        prev_ended_with_punctuation = True
+            
+            if (current_len + add_len > max_chars and current_chunk and not force_no_split) or prev_ended_with_punctuation:
+                chunks.append(current_chunk)
+                current_chunk = [rw]
+                current_len = len(rw)
+            else:
+                current_chunk.append(rw)
+                current_len += add_len
+                
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+        # Gán thời gian bắt đầu và kết thúc cho từng dòng con
+        duration = end_ms - start_ms
+        
+        word_idx = 0
+        for chunk in chunks:
+            chunk_text = " ".join(chunk)
+            num_words = len(chunk)
+            
+            start_word_idx = word_idx
+            end_word_idx = word_idx + num_words - 1
+            word_idx += num_words
+            
+            c_start = start_ms
+            c_end = end_ms
+            
+            if words_ts and len(words_ts) > 0:
+                ts_start_idx = min(start_word_idx, len(words_ts) - 1)
+                c_start = words_ts[ts_start_idx].get("start_ms", start_ms)
+                
+                ts_end_idx = min(end_word_idx, len(words_ts) - 1)
+                c_end = words_ts[ts_end_idx].get("end_ms", end_ms)
+            else:
+                c_start = int(start_ms + (start_word_idx / total_raw_words) * duration)
+                c_end = int(start_ms + ((end_word_idx + 1) / total_raw_words) * duration)
+                
+            if c_start < start_ms:
+                c_start = start_ms
+            if c_end > end_ms:
+                c_end = end_ms
+            if c_end <= c_start:
+                c_end = c_start + 100
+                
+            new_sents.append({
+                "index": idx_counter,
+                "text": chunk_text,
+                "start_ms": c_start,
+                "end_ms": c_end,
+                "words": []
+            })
+            idx_counter += 1
+            
+    return new_sents
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  BUILD SLIDE TIMELINE
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -173,6 +282,7 @@ def export_video(
     output_path: str,
     resolution: tuple[int, int] = (1280, 720),
     fps: int = 25,
+    sub_settings: Optional[dict] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> str:
     """
@@ -242,13 +352,102 @@ def export_video(
         with open(concat_file, "w", encoding="utf-8") as f:
             f.write("\n".join(concat_lines))
 
+        _rep(75, "Đang tạo phụ đề…")
+        
+        # Subtitles logic
+        ass_path = ""
+        vf_filter = f"fps={fps}"
+        
+        if sub_settings and sub_settings.get("enabled", True):
+            try:
+                def ms_to_ass_time(ms: float) -> str:
+                    s, ms = divmod(int(ms), 1000)
+                    m, s = divmod(s, 60)
+                    h, m = divmod(m, 60)
+                    cs = ms // 10
+                    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+                # Scale font size matching the resolution
+                ass_size = int(sub_settings.get("font_size", 20) * (H / 400))
+                
+                color_map = {
+                    "Trắng": "FFFFFF",
+                    "Vàng": "00FFFF",
+                    "Xanh lá": "00FF00",
+                    "Xanh lam": "FF0000"  # BGR
+                }
+                color_hex = color_map.get(sub_settings.get("color", "Trắng"), "FFFFFF")
+                
+                style_name = sub_settings.get("style", "Viền đen")
+                border_style = 1
+                outline = 2
+                outline_color_hex = "00000000"
+                back_color_hex = "80000000"
+                
+                if style_name == "Viền đen":
+                    border_style = 1
+                    outline = 2
+                    outline_color_hex = "00000000"
+                elif style_name == "Nền đen mờ":
+                    border_style = 3
+                    outline = 4  # Dùng outline làm độ đệm (padding) cho nền đen mờ
+                    outline_color_hex = "5A000000"  # Màu viền trùng với màu nền đen mờ để tạo thành khối đồng nhất
+                    back_color_hex = "5A000000"  # AABBGGRR (65% opaque black, matches QColor(0,0,0,165))
+                elif style_name == "Không viền":
+                    border_style = 1
+                    outline = 0
+                    outline_color_hex = "00000000"
+                    
+                # pos=1 → MarginV=0 (sát đáy), pos=2 → H/100, ...
+                pos_pct  = sub_settings.get("position", 1)
+                margin_v = int(H * (pos_pct - 1) / 100)
+                
+                # Generate ASS content
+                ass_lines = [
+                    "[Script Info]",
+                    "Title: Subtitles",
+                    "ScriptType: v4.00+",
+                    "WrapStyle: 0",
+                    f"PlayResX: {W}",
+                    f"PlayResY: {H}",
+                    "ScaledBorderAndShadow: yes",
+                    "",
+                    "[V4+ Styles]",
+                    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+                    f"Style: Default,Arial,{ass_size},&H00{color_hex}&,&H00000000&,&H{outline_color_hex}&,&H{back_color_hex}&,-1,0,0,0,100,100,0,0,{border_style},{outline},0,2,10,10,{margin_v},1",
+                    "",
+                    "[Events]",
+                    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+                ]
+                
+                sents = json_data.get("sentences", [])
+                sents = split_sentences_into_single_lines(sents, max_chars=45)
+                for sent in sents:
+                    start_ms = sent.get("start_ms", 0)
+                    end_ms   = sent.get("end_ms", start_ms + 1000)
+                    s_text   = sent.get("text", "").strip()
+                    if s_text:
+                        start_str = ms_to_ass_time(start_ms)
+                        end_str   = ms_to_ass_time(end_ms)
+                        # ASS dialogue format
+                        ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{s_text}")
+
+                ass_path = os.path.join(tmp, "subtitles.ass")
+                with open(ass_path, "w", encoding="utf-8") as ass_f:
+                    ass_f.write("\n".join(ass_lines))
+                
+                ass_path_esc = ass_path.replace("\\", "/").replace(":", "\\:")
+                vf_filter = f"fps={fps},subtitles='{ass_path_esc}'"
+            except Exception as sub_err:
+                pass
+
         _rep(78, "Đang encode video…")
 
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0", "-i", concat_file,
             "-i", mp3_path,
-            "-vf", f"fps={fps}",    # Ép framerate cố định (ví dụ 25 fps) để các trình phát video render được hình ảnh
+            "-vf", vf_filter,
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "23",

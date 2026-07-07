@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
 from PyQt6.QtCore import (
-    Qt, QThread, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve,
+    Qt, QThread, QSize, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QPixmap, QTextCharFormat, QTextCursor, QPainter,
@@ -21,7 +22,8 @@ from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget, QProgressBar,
-    QToolButton, QGridLayout, QTextEdit,
+    QToolButton, QGridLayout, QTextEdit, QCheckBox, QComboBox,
+    QSlider, QSpinBox,
 )
 
 from app.core.slide_processor import (
@@ -33,6 +35,66 @@ from app.core.slide_processor import (
 # ═══════════════════════════════════════════════════════════════════════════
 #  WORKER THREAD
 # ═══════════════════════════════════════════════════════════════════════════
+
+class SlideScriptEditor(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tag_ranges = []  # list of (start, end, is_selected, slide_num)
+
+    def set_tag_ranges(self, ranges):
+        self._tag_ranges = ranges
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        # 1. Paint base text editor
+        super().paintEvent(event)
+
+        # 2. Paint rounded pill badges on top of [Slide X] text
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        for start, end, is_selected, slide_num in self._tag_ranges:
+            c_start = QTextCursor(self.document())
+            c_start.setPosition(start)
+            c_end = QTextCursor(self.document())
+            c_end.setPosition(end)
+
+            rect_start = self.cursorRect(c_start)
+            rect_end = self.cursorRect(c_end)
+
+            if rect_start.top() == rect_end.top():
+                tag_width = rect_end.left() - rect_start.left()
+                tag_height = rect_start.height()
+                if tag_width > 0:
+                    # Margins and overhang to completely cover underlying brackets
+                    rect = QRect(
+                        rect_start.left() - 4,
+                        rect_start.top() + 1,
+                        tag_width + 8,
+                        tag_height - 2
+                    )
+                    
+                    bg_color = QColor("#db2777") if is_selected else QColor("#7c3aed")
+                    painter.setBrush(bg_color)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    
+                    # Pill radius (capsule style)
+                    radius = rect.height() / 2.0
+                    painter.drawRoundedRect(rect, radius, radius)
+
+                    # Paint text white bold
+                    painter.setPen(QColor("#ffffff"))
+                    font = self.font()
+                    font.setBold(True)
+                    if font.pointSize() > 0:
+                        font.setPointSize(font.pointSize() - 1)
+                    elif font.pixelSize() > 0:
+                        font.setPixelSize(font.pixelSize() - 1)
+                    painter.setFont(font)
+                    
+                    text = f"[Slide {slide_num}]"
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
 
 class SlideLoadThread(QThread):
     progress  = pyqtSignal(int, str)
@@ -69,22 +131,58 @@ class SlideThumbnailCard(QFrame):
     _STYLE_NORMAL = """
         QFrame#slideCard {
             background-color: #161b22;
-            border: 2px solid #30363d;
-            border-radius: 8px;
+            border: 1.5px solid #30363d;
+            border-radius: 10px;
+        }
+        QFrame#slideCard:hover {
+            border: 1.5px solid #8b949e;
+        }
+        QLabel#slideBadge {
+            background-color: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #8b949e;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px;
         }
     """
     _STYLE_SELECTED = """
         QFrame#slideCard {
-            background-color: #1a0e36;
-            border: 2px solid #7c3aed;
-            border-radius: 8px;
+            background-color: #0f0b1e;
+            border: 1.5px solid #8b5cf6;
+            border-radius: 10px;
+        }
+        QFrame#slideCard:hover {
+            border: 1.5px solid #a78bfa;
+        }
+        QLabel#slideBadge {
+            background-color: #2e1065;
+            border: 1px solid #8b5cf6;
+            border-radius: 6px;
+            color: #c084fc;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px;
         }
     """
     _STYLE_ASSIGNED = """
         QFrame#slideCard {
-            background-color: #0f2d0f;
-            border: 2px solid #238636;
-            border-radius: 8px;
+            background-color: #08170e;
+            border: 1.5px solid #10b981;
+            border-radius: 10px;
+        }
+        QFrame#slideCard:hover {
+            border: 1.5px solid #34d399;
+        }
+        QLabel#slideBadge {
+            background-color: #064e3b;
+            border: 1px solid #10b981;
+            border-radius: 6px;
+            color: #34d399;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px;
         }
     """
 
@@ -134,9 +232,9 @@ class SlideThumbnailCard(QFrame):
 
         # Badge gán
         self._badge = QLabel("Chưa gán")
-        self._badge.setObjectName("badge")
+        self._badge.setObjectName("slideBadge")
         self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._badge.setFixedHeight(18)
+        self._badge.setFixedHeight(22)
         lay.addWidget(self._badge)
 
         # Title (clipped)
@@ -169,14 +267,9 @@ class SlideThumbnailCard(QFrame):
     def refresh_state(self):
         if self.slide.is_assigned:
             snip = self.slide.assigned_text[:22] + "…" if len(self.slide.assigned_text) > 22 else self.slide.assigned_text
-            self._badge.setText(f"✓ {snip}")
-            self._badge.setObjectName("badge-green")
+            self._badge.setText(f"✓ {snip}" if snip else "✓ Đã gán")
         else:
             self._badge.setText("Chưa gán")
-            self._badge.setObjectName("badge")
-
-        self._badge.style().unpolish(self._badge)
-        self._badge.style().polish(self._badge)
 
         if self._selected:
             self.setStyleSheet(self._STYLE_SELECTED)
@@ -291,6 +384,13 @@ class SlideSyncTab(QWidget):
         self._card_map: dict[int, SlideThumbnailCard] = {}
         self._idx_to_pos: dict[int, int] = {}   # slide.index → list position
         self._load_thread: Optional[SlideLoadThread] = None
+        self._sub_settings = {
+            "enabled": True,
+            "font_size": 20,
+            "color": "Trắng",
+            "style": "Viền đen",
+            "position": 3,
+        }
         self._build_ui()
 
 
@@ -409,7 +509,7 @@ class SlideSyncTab(QWidget):
         lay.addLayout(hdr)
 
         # Text editor
-        self._editor = QPlainTextEdit()
+        self._editor = SlideScriptEditor()
         self._editor.setReadOnly(False)
         self._editor.setPlaceholderText(
             "Kịch bản sẽ được tải tự động từ bước tạo MP3.\n\n"
@@ -420,22 +520,109 @@ class SlideSyncTab(QWidget):
             "selection-background-color:#4c1d95; }"
         )
         self._editor.cursorPositionChanged.connect(self._on_cursor_changed)
+        self._editor.textChanged.connect(self._on_text_changed)
         lay.addWidget(self._editor, 1)
 
         # Assign button (prominent)
         assign_row = QHBoxLayout()
-        self._assign_btn = QPushButton("⬅  Gán Slide đang chọn vào vị trí này")
+        self._assign_btn = QPushButton("⬅  Gán Slide đang chọn")
         self._assign_btn.setObjectName("primary")
         self._assign_btn.setMinimumHeight(38)
         self._assign_btn.setEnabled(False)
         self._assign_btn.clicked.connect(self._assign_slide)
+
+        self._auto_btn = QPushButton("⚡  Tự động gán tất cả")
+        self._auto_btn.setObjectName("success")
+        self._auto_btn.setMinimumHeight(38)
+        self._auto_btn.setEnabled(False)
+        self._auto_btn.clicked.connect(self._auto_assign_slides)
+
+        assign_row.addWidget(self._assign_btn, 1)
+        assign_row.addWidget(self._auto_btn, 1)
+        lay.addLayout(assign_row)
+
         self._assign_hint = QLabel("← Chọn 1 slide bên phải trước")
         self._assign_hint.setStyleSheet(
             "color:#484f58; font-size:11px; background:transparent;"
         )
-        assign_row.addWidget(self._assign_btn, 1)
-        lay.addLayout(assign_row)
         lay.addWidget(self._assign_hint)
+
+        # ⚙️ Subtitle Settings Panel — gọn 2 hàng
+        self._sub_frame = QFrame()
+        self._sub_frame.setStyleSheet("""
+            QFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+            QLabel { color: #8b949e; font-size: 11px; font-weight: 600; border: none; }
+            QComboBox, QCheckBox {
+                background-color: #0d1117; border: 1px solid #30363d;
+                border-radius: 4px; padding: 3px 6px; color: #e6edf3; font-size: 12px;
+            }
+        """)
+        sf_lay = QVBoxLayout(self._sub_frame)
+        sf_lay.setContentsMargins(10, 6, 10, 6)
+        sf_lay.setSpacing(4)
+
+        # Hàng 1: checkbox + cỡ chữ + màu + kiểu
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+
+        self._sub_enable_cb = QCheckBox("Hiển thị phụ đề")
+        self._sub_enable_cb.setChecked(self._sub_settings.get("enabled", True))
+        self._sub_enable_cb.stateChanged.connect(self._on_sub_settings_changed)
+        row1.addWidget(self._sub_enable_cb)
+
+        row1.addWidget(QLabel("Cỡ:"))
+        self._sub_size_combo = QComboBox()
+        self._sub_size_combo.addItems(["14", "16", "18", "20", "22", "24", "26", "28", "32"])
+        self._sub_size_combo.setCurrentText(str(self._sub_settings.get("font_size", 20)))
+        self._sub_size_combo.setFixedWidth(52)
+        self._sub_size_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        row1.addWidget(self._sub_size_combo)
+
+        row1.addWidget(QLabel("Màu:"))
+        self._sub_color_combo = QComboBox()
+        self._sub_color_combo.addItems(["Trắng", "Vàng", "Xanh lá", "Xanh lam"])
+        self._sub_color_combo.setCurrentText(self._sub_settings.get("color", "Trắng"))
+        self._sub_color_combo.setFixedWidth(72)
+        self._sub_color_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        row1.addWidget(self._sub_color_combo)
+
+        row1.addWidget(QLabel("Kiểu:"))
+        self._sub_style_combo = QComboBox()
+        self._sub_style_combo.addItems(["Viền đen", "Nền đen mờ", "Không viền"])
+        self._sub_style_combo.setCurrentText(self._sub_settings.get("style", "Viền đen"))
+        self._sub_style_combo.setFixedWidth(90)
+        self._sub_style_combo.currentTextChanged.connect(self._on_sub_settings_changed)
+        row1.addWidget(self._sub_style_combo)
+        row1.addStretch()
+        sf_lay.addLayout(row1)
+
+        # Hàng 2: vị trí slider (compact)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(QLabel("Vị trí (% đáy):"))
+        self._sub_pos_slider = QSlider(Qt.Orientation.Horizontal)
+        self._sub_pos_slider.setMinimum(1)
+        self._sub_pos_slider.setMaximum(60)
+        self._sub_pos_slider.setValue(self._sub_settings.get("position", 1))
+        self._sub_pos_slider.setStyleSheet(
+            "QSlider::groove:horizontal { height:4px; background:#30363d; border-radius:2px; }"
+            "QSlider::handle:horizontal { width:12px; height:12px; margin:-4px 0;"
+            " background:#7c3aed; border-radius:6px; }"
+            "QSlider::sub-page:horizontal { background:#6d28d9; border-radius:2px; }"
+        )
+        self._sub_pos_spin = QSpinBox()
+        self._sub_pos_spin.setMinimum(1)
+        self._sub_pos_spin.setMaximum(60)
+        self._sub_pos_spin.setValue(self._sub_settings.get("position", 1))
+        self._sub_pos_spin.setFixedWidth(48)
+        self._sub_pos_slider.valueChanged.connect(self._sub_pos_spin.setValue)
+        self._sub_pos_spin.valueChanged.connect(self._sub_pos_slider.setValue)
+        self._sub_pos_slider.valueChanged.connect(self._on_sub_settings_changed)
+        row2.addWidget(self._sub_pos_slider, 1)
+        row2.addWidget(self._sub_pos_spin)
+        sf_lay.addLayout(row2)
+
+        lay.addWidget(self._sub_frame)
 
         return w
 
@@ -626,6 +813,19 @@ class SlideSyncTab(QWidget):
         self._slide_count_lbl.setText(f"{len(self._slides)} slide")
         # Build a fast lookup: slide.index -> list position
         self._idx_to_pos: dict[int, int] = {s.index: i for i, s in enumerate(self._slides)}
+        
+        # Load saved mapping if it exists
+        if self._mp3_path:
+            slides_json = Path(self._mp3_path).with_suffix(".slides.json")
+            if slides_json.exists():
+                try:
+                    with open(slides_json, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    apply_mapping_from_dict(self._slides, data)
+                except Exception:
+                    pass
+
+        self._refresh_editor_from_slides()
         self._select_slide(self._slides[0].index if self._slides else None)
 
     def _on_slide_selected(self, idx: int):
@@ -644,6 +844,7 @@ class SlideSyncTab(QWidget):
             self._preview_title.setText("")
             self._assign_btn.setEnabled(False)
             self._assign_hint.setText("← Chọn 1 slide bên phải trước")
+            self._draw_markers()
             return
 
         self._card_map[idx].set_selected(True)
@@ -651,6 +852,7 @@ class SlideSyncTab(QWidget):
         # Get slide by index using the lookup table
         pos = self._idx_to_pos.get(idx)
         if pos is None:
+            self._draw_markers()
             return
         slide = self._slides[pos]
 
@@ -672,6 +874,7 @@ class SlideSyncTab(QWidget):
         self._assign_hint.setText(
             f"Slide #{slide.display_number} đã chọn  •  Nhấp vào văn bản bên trái rồi nhấn Gán"
         )
+        self._draw_markers()
 
     def _remove_slide(self, idx: int):
         self._slides = [s for s in self._slides if s.index != idx]
@@ -703,46 +906,145 @@ class SlideSyncTab(QWidget):
         col    = cursor.columnNumber() + 1
         self._cursor_lbl.setText(f"Dòng {block}, Cột {col}  (vị trí {pos})")
 
+    def parse_editor_text(self, editor_text: str) -> tuple[str, dict[int, tuple[int, str]]]:
+        pattern = re.compile(r"\[Slide (\d+)\]")
+        matches = list(pattern.finditer(editor_text))
+        
+        clean_parts = []
+        last_idx = 0
+        total_tag_len = 0
+        
+        assignments = {} # slide_index -> clean_pos
+        
+        for match in matches:
+            clean_parts.append(editor_text[last_idx:match.start()])
+            clean_pos = match.start() - total_tag_len
+            
+            slide_num = int(match.group(1))
+            slide_idx = slide_num - 1
+            assignments[slide_idx] = clean_pos
+            
+            last_idx = match.end()
+            total_tag_len += (match.end() - match.start())
+            
+        clean_parts.append(editor_text[last_idx:])
+        clean_text = "".join(clean_parts)
+        
+        final_assignments = {}
+        for idx, clean_pos in assignments.items():
+            snip_start = max(0, clean_pos)
+            snip_end = min(len(clean_text), clean_pos + 45)
+            snippet = clean_text[snip_start:snip_end].replace("\n", " ").strip()
+            final_assignments[idx] = (clean_pos, snippet)
+            
+        return clean_text, final_assignments
+
+    def _on_text_changed(self):
+        raw_text = self._editor.toPlainText()
+        
+        clean_text, assignments = self.parse_editor_text(raw_text)
+        self._script_text = clean_text
+        
+        # Reset assignments
+        for slide in self._slides:
+            slide.assigned_pos = -1
+            slide.assigned_text = ""
+            
+        # Apply parsed assignments
+        for idx, (pos, snippet) in assignments.items():
+            if 0 <= idx < len(self._slides):
+                self._slides[idx].assigned_pos = pos
+                self._slides[idx].assigned_text = snippet
+                
+        # Draw markers
+        self._draw_markers()
+        
+        # Refresh cards
+        for idx, card in self._card_map.items():
+            card.refresh_state()
+            
+        # Update stats
+        self._update_stats()
+
+    def _refresh_editor_from_slides(self):
+        assigned = [s for s in self._slides if s.is_assigned]
+        assigned.sort(key=lambda s: (s.assigned_pos, s.index), reverse=True)
+        
+        chars = list(self._script_text)
+        for slide in assigned:
+            pos = min(len(chars), max(0, slide.assigned_pos))
+            tag = f"[Slide {slide.display_number}]"
+            chars.insert(pos, tag)
+            
+        new_text = "".join(chars)
+        
+        self._editor.blockSignals(True)
+        self._editor.setPlainText(new_text)
+        self._editor.blockSignals(False)
+        
+        self._on_text_changed()
+
+    def _draw_markers(self):
+        """Tô màu các tag [Slide X] trong editor."""
+        extra_selections = []
+        text = self._editor.toPlainText()
+        pattern = re.compile(r"\[Slide (\d+)\]")
+        
+        ranges = []
+        for match in pattern.finditer(text):
+            slide_num = int(match.group(1))
+            slide_idx = slide_num - 1
+            is_sel = (self._selected_index == slide_idx)
+            
+            ranges.append((match.start(), match.end(), is_sel, slide_num))
+            
+            # Make the original text background and text color match the dark editor theme,
+            # so the underlying raw text is completely invisible under our custom painted pill.
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#0d1117"))
+            fmt.setBackground(QColor("#0d1117"))
+            fmt.setToolTip(f"Slide #{slide_num}")
+
+            sel = QTextEdit.ExtraSelection()
+            sel.format = fmt
+            cursor = self._editor.textCursor()
+            cursor.setPosition(match.start())
+            cursor.setPosition(match.end(), QTextCursor.MoveMode.KeepAnchor)
+            sel.cursor = cursor
+            extra_selections.append(sel)
+
+        self._editor.set_tag_ranges(ranges)
+        self._editor.setExtraSelections(extra_selections)
+
     def _assign_slide(self):
         if self._selected_index is None:
             return
 
-        # Get slide via card_map — guaranteed same object the card holds
         card = self._card_map.get(self._selected_index)
         if card is None:
             return
         slide = card.slide
 
+        tag_str = f"[Slide {slide.display_number}]"
+
+        self._editor.blockSignals(True)
+        
+        # Xóa tag cũ nếu có
         cursor = self._editor.textCursor()
-        pos    = cursor.position()
+        doc = self._editor.document()
+        find_cursor = doc.find(tag_str)
+        if not find_cursor.isNull():
+            find_cursor.removeSelectedText()
+            
+        # Chèn tag mới vào vị trí con trỏ hiện tại
+        cursor.insertText(tag_str)
+        
+        self._editor.blockSignals(False)
 
-        # Get snippet (surrounding text ~50 chars)
-        text = self._editor.toPlainText()
-        snip_start = max(0, pos - 5)
-        snip_end   = min(len(text), pos + 45)
-        snippet    = text[snip_start:snip_end].replace("\n", " ").strip()
+        # Cập nhật
+        self._on_text_changed()
 
-        slide.assigned_pos  = pos
-        slide.assigned_text = snippet
-
-        # Also ensure the object in self._slides is updated
-        # (guard against any reference divergence)
-        list_pos = self._idx_to_pos.get(slide.index)
-        if list_pos is not None:
-            self._slides[list_pos].assigned_pos  = pos
-            self._slides[list_pos].assigned_text = snippet
-
-        # Visual marker in text
-        self._draw_markers()
-
-        # Refresh card + force immediate repaint
-        card.refresh_state()
-        card.repaint()
-
-        # Update stats
-        self._update_stats()
-
-        # Flash feedback on button
+        # Flash feedback
         orig = self._assign_btn.text()
         self._assign_btn.setText("✓  Đã gán!")
         self._assign_btn.setEnabled(False)
@@ -752,42 +1054,96 @@ class SlideSyncTab(QWidget):
             self._assign_btn.setEnabled(True),
         ))
 
-    def _draw_markers(self):
-        """Tô màu các vị trí gán slide trong editor."""
-        extra_selections = []
-        text = self._editor.toPlainText()
-
-        for slide in self._slides:
-            if not slide.is_assigned:
-                continue
-            pos = slide.assigned_pos
-            if pos < 0 or pos > len(text):
-                continue
-
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#2d1b69"))
-            fmt.setForeground(QColor("#c4b5fd"))
-            fmt.setToolTip(f"[Slide {slide.display_number}] {slide.title}")
-
-            # Mark 1 character at position (or a small range)
-            sel = QTextEdit.ExtraSelection()
-            sel.format = fmt
-            cursor = self._editor.textCursor()
-            cursor.setPosition(max(0, pos - 1))
-            cursor.setPosition(min(len(text), pos + 60), QTextCursor.MoveMode.KeepAnchor)
-            sel.cursor = cursor
-            extra_selections.append(sel)
-
-        self._editor.setExtraSelections(extra_selections)
-
     def _unassign_slide(self, idx: int):
-        if idx < len(self._slides):
-            self._slides[idx].assigned_pos  = -1
-            self._slides[idx].assigned_text = ""
-            self._draw_markers()
-            if idx in self._card_map:
-                self._card_map[idx].refresh_state()
-            self._update_stats()
+        if idx >= len(self._slides):
+            return
+        slide = self._slides[idx]
+        tag_str = f"[Slide {slide.display_number}]"
+        
+        self._editor.blockSignals(True)
+        doc = self._editor.document()
+        find_cursor = doc.find(tag_str)
+        if not find_cursor.isNull():
+            find_cursor.removeSelectedText()
+        self._editor.blockSignals(False)
+        
+        self._on_text_changed()
+
+    def _auto_assign_slides(self):
+        if not self._slides:
+            return
+            
+        # Cảnh báo người dùng trước khi thực hiện
+        reply = QMessageBox.question(
+            self,
+            "⚡ Tự động gán Slide",
+            "Hệ thống sẽ tự động phân bổ tất cả slide vào các vị trí trong kịch bản.\n"
+            "Các gán cũ (nếu có) sẽ bị ghi đè.\n\n"
+            "Hãy kiểm tra và điều chỉnh lại sau khi gán tự động kết thúc.\n"
+            "Bạn có muốn tiếp tục không?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        text = self._script_text
+        n = len(self._slides)
+        text_len = len(text)
+        
+        if n == 1:
+            self._slides[0].assigned_pos = 0
+            self._refresh_editor_from_slides()
+            return
+            
+        # 1. Slide đầu tiên ở 0
+        # 2. Slide cuối cùng ở dấu chấm cuối
+        last_dot = text.rfind('.')
+        if last_dot == -1:
+            last_dot = text_len
+
+        # 3. Phân bổ các slide ở giữa
+        from app.core.mp3_exporter import split_into_sentences
+        sentences = split_into_sentences(text)
+        
+        sentence_starts = []
+        char_cursor = 0
+        for sent in sentences:
+            char_start = text.find(sent, char_cursor)
+            if char_start == -1:
+                char_start = char_cursor
+            sentence_starts.append(char_start)
+            char_cursor = char_start + len(sent)
+
+        # Lọc các câu hợp lệ nằm trước dấu chấm cuối
+        valid_starts = [pos for pos in sentence_starts if pos < last_dot]
+        
+        # Reset assignments
+        for s in self._slides:
+            s.assigned_pos = -1
+            s.assigned_text = ""
+
+        # Gán slide đầu
+        self._slides[0].assigned_pos = 0
+        
+        # Gán slide giữa (1 to n-2)
+        for i in range(1, n - 1):
+            if len(valid_starts) >= n - 1:
+                # Đủ câu, gán theo câu
+                sent_idx = int(i * len(valid_starts) / (n - 1))
+                pos = valid_starts[sent_idx]
+            else:
+                # Thiếu câu, gán theo ký tự và snap về đầu từ
+                pos = int(i * last_dot / (n - 1))
+                while pos > 0 and not text[pos - 1].isspace():
+                    pos -= 1
+                pos = min(pos, last_dot)
+            self._slides[i].assigned_pos = pos
+
+        # Gán slide cuối
+        self._slides[-1].assigned_pos = last_dot
+        
+        # Cập nhật ngược lại vào editor
+        self._refresh_editor_from_slides()
 
     # ─────────────────────────────────────────────────────────────────────
     #  STATS
@@ -810,6 +1166,8 @@ class SlideSyncTab(QWidget):
             self._warn_lbl.setText(f"⚠  Còn {unassigned} slide chưa gán vị trí")
         else:
             self._warn_lbl.setText("")
+
+        self._auto_btn.setEnabled(total > 0 and bool(self._editor.toPlainText().strip()))
 
     # ─────────────────────────────────────────────────────────────────────
     #  SAVE / EXPORT
@@ -850,9 +1208,41 @@ class SlideSyncTab(QWidget):
             script_text=self._script_text,
             mp3_path=self._mp3_path,
             json_path=self._json_path,
+            sub_settings=self._sub_settings,
             parent=self,
         )
         dlg.exec()
+        # Sync back changes (if they modified them inside the preview dialog)
+        self._sync_sub_controls()
+
+    def _on_sub_settings_changed(self):
+        self._sub_settings["enabled"]   = self._sub_enable_cb.isChecked()
+        self._sub_settings["font_size"] = int(self._sub_size_combo.currentText())
+        self._sub_settings["color"]     = self._sub_color_combo.currentText()
+        self._sub_settings["style"]     = self._sub_style_combo.currentText()
+        self._sub_settings["position"]  = self._sub_pos_slider.value()
+
+    def _sync_sub_controls(self):
+        self._sub_enable_cb.blockSignals(True)
+        self._sub_size_combo.blockSignals(True)
+        self._sub_color_combo.blockSignals(True)
+        self._sub_style_combo.blockSignals(True)
+        self._sub_pos_slider.blockSignals(True)
+        self._sub_pos_spin.blockSignals(True)
+        
+        self._sub_enable_cb.setChecked(self._sub_settings.get("enabled", True))
+        self._sub_size_combo.setCurrentText(str(self._sub_settings.get("font_size", 20)))
+        self._sub_color_combo.setCurrentText(self._sub_settings.get("color", "Trắng"))
+        self._sub_style_combo.setCurrentText(self._sub_settings.get("style", "Viền đen"))
+        self._sub_pos_slider.setValue(self._sub_settings.get("position", 5))
+        self._sub_pos_spin.setValue(self._sub_settings.get("position", 5))
+        
+        self._sub_enable_cb.blockSignals(False)
+        self._sub_size_combo.blockSignals(False)
+        self._sub_color_combo.blockSignals(False)
+        self._sub_style_combo.blockSignals(False)
+        self._sub_pos_slider.blockSignals(False)
+        self._sub_pos_spin.blockSignals(False)
 
     def _go_export(self):
         if not self._slides:
@@ -880,6 +1270,7 @@ class SlideSyncTab(QWidget):
             script_text=self._script_text,
             mp3_path=self._mp3_path,
             json_path=self._json_path,
+            sub_settings=self._sub_settings,
             parent=self,
         )
         dlg.exec()

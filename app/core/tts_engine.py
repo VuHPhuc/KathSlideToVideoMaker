@@ -2,10 +2,18 @@ import os
 import sys
 import json
 import wave
+import asyncio
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional, Tuple
 
 import requests
+
+# Set event loop policy on Windows to avoid 'Event loop is closed' crash in loops
+if sys.platform == 'win32':
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 # Prepend python.exe folder to PATH so pydub/ffmpeg is always found
 py_bin_dir = os.path.dirname(sys.executable)
@@ -27,12 +35,46 @@ VI_MALE_MODELS: Dict[str, Dict[str, Any]] = {
         "multi_speaker": False,
         "default_speaker": 0,
     },
+    "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam Trầm - Ấm áp)": {
+        "engine": "edge",
+        "voice": "vi-VN-NamMinhNeural",
+        "pitch": "-4Hz",
+        "description": "Giọng đọc Neural của Microsoft với cao độ được hạ thấp nhẹ (-4Hz) tạo cảm giác giọng nam trầm ấm, cuốn hút.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
+    "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam Trầm - Dày tiếng)": {
+        "engine": "edge",
+        "voice": "vi-VN-NamMinhNeural",
+        "pitch": "-7Hz",
+        "description": "Giọng đọc Neural của Microsoft với cao độ trầm sâu tối đa (-7Hz) tạo cảm giác giọng nam trầm dày, đĩnh đạc.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
     "Edge-TTS vi-VN-HoaiMyNeural (Giọng Nữ - Rất hay)": {
         "engine": "edge",
         "voice": "vi-VN-HoaiMyNeural",
         "description": "Giọng đọc Neural của Microsoft (Online). Giọng Nữ, cực kỳ tự nhiên, trôi chảy và chất lượng cao.",
         "multi_speaker": False,
         "default_speaker": 0,
+    },
+    "Edge-TTS vi-VN-HoaiMyNeural (Giọng Nữ Trầm - Ấm áp)": {
+        "engine": "edge",
+        "voice": "vi-VN-HoaiMyNeural",
+        "pitch": "-4Hz",
+        "description": "Giọng đọc Nữ Neural của Microsoft với cao độ hạ thấp nhẹ (-4Hz) tạo cảm giác giọng nữ ấm áp, dịu dàng.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
+    "vi-vais1000-medium (~60 MB, giọng Offline Chất lượng tốt)": {
+        "engine": "piper",
+        "onnx_url":   f"{HF_BASE}/vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx",
+        "config_url": f"{HF_BASE}/vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx.json",
+        "onnx_file":   "vi_VN-vais1000-medium.onnx",
+        "config_file": "vi_VN-vais1000-medium.onnx.json",
+        "multi_speaker": False,
+        "default_speaker": 0,
+        "description": "Mô hình Piper Offline giọng đọc miền Nam chất lượng tốt (Medium). Đọc tự nhiên, trôi chảy và chạy 100% không cần mạng.",
     },
     "vi-25hours_single-low (~15 MB, giọng Nam Offline)": {
         "engine": "piper",
@@ -201,17 +243,22 @@ class TTSEngine:
             # Ánh xạ tốc độ đọc (ví dụ: speed = 1.3 -> +30%)
             rate_pct = round((speed - 1.0) * 100)
             rate_str = f"+{rate_pct}%" if rate_pct >= 0 else f"{rate_pct}%"
+            pitch_str = info.get("pitch", None)
 
             async def run_edge():
-                communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+                # Chỉ truyền tham số pitch nếu có cấu hình trầm
+                if pitch_str:
+                    communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
+                else:
+                    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
                 await communicate.save(temp_mp3)
 
-            # Thêm độ trễ nhỏ để tránh bị rate limit từ máy chủ Edge
-            time.sleep(0.15)
+            # Thêm độ trễ nhỏ để tránh bị rate limit từ máy chủ Edge (tăng lên 0.5s để đảm bảo ổn định)
+            time.sleep(0.5)
 
             success = False
             last_err = None
-            backoffs = [1, 2, 4]
+            backoffs = [1, 2, 2, 3, 3, 4, 5, 5, 5, 5]  # Tăng lên 10 lần thử với tổng thời gian chờ lớn hơn
             for attempt, delay in enumerate(backoffs):
                 try:
                     # Chạy coroutine đồng bộ
@@ -224,13 +271,13 @@ class TTSEngine:
                     time.sleep(delay)
 
             if not success:
-                # Thay vì crash cả quá trình xuất, fallback về khoảng lặng để giữ timeline cho slide
-                print(f"[ERROR] Failed to connect Edge-TTS. Falling back to silence.")
-                word_count = len(text.split())
-                silence_duration = max(1500, word_count * 280) # ước lượng ~280ms mỗi từ
-                silence = AudioSegment.silent(duration=silence_duration)
-                silence.export(output_wav_path, format="wav")
-                return
+                # Không được tự ý thay thế bằng khoảng lặng nữa, bắt buộc phải lấy được tiếng
+                raise RuntimeError(
+                    f"Không thể kết nối đến máy chủ Edge-TTS để lấy âm thanh sau 10 lần thử.\n"
+                    f"Chi tiết lỗi: {last_err}\n"
+                    f"Văn bản câu lỗi: \"{text}\"\n\n"
+                    f"Vui lòng kiểm tra lại kết nối mạng Internet hoặc thử lại sau."
+                )
 
             try:
                 # Chuyển đổi sang WAV

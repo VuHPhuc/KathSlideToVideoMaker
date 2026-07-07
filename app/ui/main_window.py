@@ -62,7 +62,7 @@ QPushButton {
 }
 QPushButton:hover  { background-color: #30363d; border-color: #6e7681; }
 QPushButton:pressed{ background-color: #161b22; }
-QPushButton:disabled { color: #484f58; border-color: #21262d; }
+QPushButton:disabled { background-color: #161b22; color: #3d444d; border-color: #21262d; }
 
 QPushButton#primary {
     background-color: #6d28d9;
@@ -72,7 +72,7 @@ QPushButton#primary {
 }
 QPushButton#primary:hover   { background-color: #7c3aed; }
 QPushButton#primary:pressed { background-color: #5b21b6; }
-QPushButton#primary:disabled{ background-color: #3b1a6e; color: #7d5ba5; }
+QPushButton#primary:disabled{ background-color: #1e2028; color: #3d444d; border: 1px solid #21262d; }
 
 QPushButton#success {
     background-color: #1a7f37;
@@ -86,7 +86,7 @@ QPushButton#success {
 }
 QPushButton#success:hover   { background-color: #238636; }
 QPushButton#success:pressed { background-color: #116329; }
-QPushButton#success:disabled{ background-color: #0d3318; color: #3fb950; }
+QPushButton#success:disabled{ background-color: #1e2028; color: #3d444d; border: 1px solid #21262d; }
 
 QPushButton#danger {
     background-color: #b91c1c;
@@ -484,7 +484,7 @@ class MainWindow(QMainWindow):
         splitter.setHandleWidth(1)
         splitter.addWidget(self._build_left())
         splitter.addWidget(self._build_right())
-        splitter.setSizes([640, 380])
+        splitter.setSizes([580, 440])  # Tăng chiều rộng panel phải để tránh scrollbar ngang
         mp3_layout.addWidget(splitter, 1)
         mp3_layout.addWidget(self._build_footer())
 
@@ -587,6 +587,7 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(container)
         scroll.setStyleSheet("QScrollArea { border:none; background:#0d1117; }")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # Tắt scrollbar ngang
 
         lay = QVBoxLayout(container)
         lay.setContentsMargins(8, 16, 16, 16)

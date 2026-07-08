@@ -303,13 +303,30 @@ class MediaDropZone(QFrame):
 class AudioMixPanel(QFrame):
     """Panel nhỏ điều chỉnh âm lượng của clip video đang chọn."""
     changed = pyqtSignal()
+    apply_video_vol_all = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._item: Optional[MediaItem] = None
+        self._last_tts_vol = 100
+        self._last_vid_vol = 30
+        
         self.setStyleSheet("""
             QFrame { background:#12161c; border:1px solid #21262d; border-radius:6px; }
             QLabel { background:transparent; color:#8b949e; font-size:10px; }
+            QToolButton {
+                background: transparent;
+                border: none;
+                color: #8b949e;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 2px 6px;
+            }
+            QToolButton:hover {
+                color: #ffffff;
+                background: #21262d;
+                border-radius: 4px;
+            }
         """)
         self.setFixedHeight(56)
 
@@ -318,7 +335,12 @@ class AudioMixPanel(QFrame):
         lay.setSpacing(14)
 
         # TTS volume
-        lay.addWidget(QLabel("🎙 TTS:"))
+        self._tts_mute_btn = QToolButton()
+        self._tts_mute_btn.setText("🎙 TTS:")
+        self._tts_mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tts_mute_btn.clicked.connect(self._toggle_tts_mute)
+        lay.addWidget(self._tts_mute_btn)
+
         self._tts_slider = QSlider(Qt.Orientation.Horizontal)
         self._tts_slider.setRange(0, 100)
         self._tts_slider.setValue(100)
@@ -338,7 +360,12 @@ class AudioMixPanel(QFrame):
         lay.addSpacing(6)
 
         # Video volume
-        lay.addWidget(QLabel("🎬 Video:"))
+        self._vid_mute_btn = QToolButton()
+        self._vid_mute_btn.setText("🎬 Video:")
+        self._vid_mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vid_mute_btn.clicked.connect(self._toggle_vid_mute)
+        lay.addWidget(self._vid_mute_btn)
+
         self._vid_slider = QSlider(Qt.Orientation.Horizontal)
         self._vid_slider.setRange(0, 100)
         self._vid_slider.setValue(30)
@@ -355,6 +382,42 @@ class AudioMixPanel(QFrame):
         lay.addWidget(self._vid_slider)
         lay.addWidget(self._vid_lbl)
 
+        lay.addSpacing(6)
+
+        # Mute all button
+        self._mute_all_btn = QToolButton()
+        self._mute_all_btn.setText("🔇 Tắt tất cả")
+        self._mute_all_btn.setToolTip("Tắt tiếng tất cả các clip video trong timeline")
+        self._mute_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mute_all_btn.clicked.connect(lambda: self.apply_video_vol_all.emit(0.0))
+        self._mute_all_btn.setStyleSheet(
+            "QToolButton{"
+            "  color:#f85149; background:transparent; border:none;"
+            "  font-size:10px; font-weight:bold; padding:2px 6px;"
+            "}"
+            "QToolButton:hover{"
+            "  color:#ff7b72; background:#2c1515; border-radius:4px;"
+            "}"
+        )
+        lay.addWidget(self._mute_all_btn)
+
+        # Set 30% button
+        self._vol30_all_btn = QToolButton()
+        self._vol30_all_btn.setText("🔉 Video 30% tất cả")
+        self._vol30_all_btn.setToolTip("Đặt âm lượng video là 30% cho tất cả các clip")
+        self._vol30_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vol30_all_btn.clicked.connect(lambda: self.apply_video_vol_all.emit(0.3))
+        self._vol30_all_btn.setStyleSheet(
+            "QToolButton{"
+            "  color:#58a6ff; background:transparent; border:none;"
+            "  font-size:10px; font-weight:bold; padding:2px 6px;"
+            "}"
+            "QToolButton:hover{"
+            "  color:#79c0ff; background:#15233c; border-radius:4px;"
+            "}"
+        )
+        lay.addWidget(self._vol30_all_btn)
+
         lay.addStretch()
 
     def set_item(self, item: Optional[MediaItem]):
@@ -368,18 +431,43 @@ class AudioMixPanel(QFrame):
             self._vid_lbl.setText(f"{int(item.video_volume*100)}%")
             self._tts_slider.blockSignals(False)
             self._vid_slider.blockSignals(False)
+            self._update_mute_states()
             self.setVisible(True)
         else:
             self.setVisible(False)
 
+    def _update_mute_states(self):
+        tts_val = self._tts_slider.value()
+        vid_val = self._vid_slider.value()
+        self._tts_mute_btn.setText("🔇 TTS:" if tts_val == 0 else "🎙 TTS:")
+        self._vid_mute_btn.setText("🔇 Video:" if vid_val == 0 else "🎬 Video:")
+
+    def _toggle_tts_mute(self):
+        curr = self._tts_slider.value()
+        if curr > 0:
+            self._last_tts_vol = curr
+            self._tts_slider.setValue(0)
+        else:
+            self._tts_slider.setValue(self._last_tts_vol if getattr(self, "_last_tts_vol", 100) > 0 else 100)
+
+    def _toggle_vid_mute(self):
+        curr = self._vid_slider.value()
+        if curr > 0:
+            self._last_vid_vol = curr
+            self._vid_slider.setValue(0)
+        else:
+            self._vid_slider.setValue(self._last_vid_vol if getattr(self, "_last_vid_vol", 30) > 0 else 30)
+
     def _on_tts_changed(self, v: int):
         self._tts_lbl.setText(f"{v}%")
+        self._update_mute_states()
         if self._item:
             self._item.tts_volume = v / 100.0
         self.changed.emit()
 
     def _on_vid_changed(self, v: int):
         self._vid_lbl.setText(f"{v}%")
+        self._update_mute_states()
         if self._item:
             self._item.video_volume = v / 100.0
         self.changed.emit()
@@ -742,6 +830,7 @@ class SlideSyncTab(QWidget):
         # Audio mix panel (chỉ hiện khi chọn video)
         self._audio_mix = AudioMixPanel()
         self._audio_mix.setVisible(False)
+        self._audio_mix.apply_video_vol_all.connect(self._on_apply_video_vol_all)
         lay.addWidget(self._audio_mix)   # stretch=0, fixed 56px khi hiện
 
         self._timeline = TimelineWidget()
@@ -867,12 +956,15 @@ class SlideSyncTab(QWidget):
             if item.media_type == "slide"
         }
         for slide in slides:
+            p = getattr(slide, "video_path", "") or getattr(slide, "image_path", "") or ""
             item = MediaItem(
                 media_type="slide",
-                path=getattr(slide, "image_path", "") or "",
+                path=p,
                 slide_info=slide,
                 duration_sec=5.0,
             )
+            if getattr(slide, "video_path", ""):
+                item.thumbnail_path = slide.image_path
             self._media_items.append(item)
 
         self._rebuild_timeline()
@@ -950,6 +1042,21 @@ class SlideSyncTab(QWidget):
         )
 
         self._draw_markers()
+
+    def _on_apply_video_vol_all(self, vol: float):
+        count = 0
+        for item in self._media_items:
+            if item.media_type == "video":
+                item.video_volume = vol
+                count += 1
+        if self._selected_id:
+            curr_item = self._find_item(self._selected_id)
+            if curr_item:
+                self._audio_mix.set_item(curr_item)
+        QMessageBox.information(
+            self, "✓ Hoàn thành",
+            f"Đã đặt âm lượng Video thành {int(vol * 100)}% cho tất cả {count} clip video!"
+        )
 
     def _on_clip_removed(self, item_id: str):
         self._media_items = [i for i in self._media_items if i.id != item_id]

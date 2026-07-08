@@ -522,6 +522,75 @@ def _make_static_video(img_path: str, dst: str, duration: float,
         )
 
 
+def _make_slide_with_gif_video(img_path: str, gifs: list, dst: str, duration: float,
+                              W: int, H: int, fps: int):
+    """Tạo video từ một ảnh PNG làm hình nền, có đè các hình GIF động (đã được định vị và co giãn)."""
+    import os
+    import sys
+    import shutil
+    import subprocess
+
+    ffmpeg_bin = shutil.which("ffmpeg") or os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe")
+    if not os.path.exists(ffmpeg_bin):
+        ffmpeg_bin = "ffmpeg"
+
+    # Command base
+    # Input 0: static background image
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-loop", "1", "-framerate", str(fps), "-i", img_path
+    ]
+
+    # Input 1, 2, ...: GIF files
+    for gif in gifs:
+        cmd.extend(["-ignore_loop", "0", "-i", gif["gif_path"]])
+
+    # Build filter complex
+    filters = []
+    # Đầu tiên scale và pad hình nền về độ phân giải WxH
+    filters.append(f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps}[bg_scaled]")
+    
+    last_output = "[bg_scaled]"
+    for idx, gif in enumerate(gifs, start=1):
+        x = int(gif["x_rel"] * W)
+        y = int(gif["y_rel"] * H)
+        w = int(gif["w_rel"] * W)
+        h = int(gif["h_rel"] * H)
+        
+        w = max(1, w)
+        h = max(1, h)
+
+        # Scale GIF
+        filters.append(f"[{idx}:v]scale={w}:{h}[g{idx}]")
+        
+        # Overlay GIF
+        next_output = f"[tmp{idx}]" if idx < len(gifs) else ""
+        shortest_str = ":shortest=1" if idx == len(gifs) else ""
+        
+        if next_output:
+            filters.append(f"{last_output}[g{idx}]overlay={x}:{y}{shortest_str}{next_output}")
+            last_output = next_output
+        else:
+            filters.append(f"{last_output}[g{idx}]overlay={x}:{y}{shortest_str}")
+
+    filter_complex = ";".join(filters)
+
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        dst
+    ])
+
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg tạo slide video với GIF thất bại:\n{result.stderr.decode('utf-8', errors='ignore')[-800:]}"
+        )
+
+
 def _normalize_video(src: str, dst: str, W: int, H: int, fps: int, duration: Optional[float] = None):
     """Chuẩn hóa video về cùng resolution/fps, giữ audio gốc. Có thể cắt ngắn theo duration."""
     cmd = [
@@ -611,7 +680,7 @@ def export_video_with_media(
             if entry:
                 m_item.duration_sec = max(0.1, entry.duration_sec)
         else:
-            if m_item.media_type == "video":
+            if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
                 m_item.duration_sec = _get_video_duration(m_item.path)
 
     _rep(12, f"Đang chuẩn bị {len(media_items)} clip…")
@@ -631,7 +700,7 @@ def export_video_with_media(
 
             clip_out = os.path.join(tmp, f"clip_{i:04d}.mp4")
 
-            if m_item.media_type == "video":
+            if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
                 # Cắt video đúng thời lượng nếu được gán
                 duration_to_use = m_item.duration_sec if m_item.is_assigned else None
                 _normalize_video(m_item.path, clip_out, W, H, fps, duration=duration_to_use)
@@ -648,7 +717,17 @@ def export_video_with_media(
                     img_path = placeholder
 
                 dur = max(0.1, m_item.duration_sec)
-                _make_static_video(img_path, clip_out, dur, W, H, fps)
+
+                # Kiểm tra slide có chứa ảnh GIF động không
+                gifs = []
+                if m_item.media_type == "slide" and m_item.slide_info:
+                    gifs = getattr(m_item.slide_info, "gifs", [])
+
+                if gifs:
+                    _make_slide_with_gif_video(img_path, gifs, clip_out, dur, W, H, fps)
+                else:
+                    _make_static_video(img_path, clip_out, dur, W, H, fps)
+
                 has_audio.append(False)
                 video_vols.append(0.0)
                 tts_vols.append(1.0)

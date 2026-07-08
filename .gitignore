@@ -10,8 +10,9 @@ __pycache__/
 *.pyd
 
 # Large media & model files
-models/
-app/models/
+/models/
+app/models/piper/
+app/models/whisper/
 *.wav
 *.mp3
 test_edge_output.wav

@@ -24,6 +24,8 @@ class SlideInfo:
     title: str = ""             # tiêu đề slide (nếu lấy được)
     assigned_pos: int = -1      # character offset trong kịch bản (-1 = chưa gán)
     assigned_text: str = ""     # đoạn văn đầu đoạn (preview ~40 chars)
+    video_path: str = ""        # đường dẫn tới file MP4 video của slide (nếu có GIF/Video)
+    gifs: list = field(default_factory=list) # Danh sách ảnh GIF nhúng trong slide: [{"gif_path": str, "x_rel": float, "y_rel": float, "w_rel": float, "h_rel": float}]
 
     @property
     def is_assigned(self) -> bool:
@@ -86,12 +88,7 @@ def load_pptx(
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> List[SlideInfo]:
     """
-    Render PPTX thành list SlideInfo (có thumbnail PNG).
-
-    Chiến lược:
-    1. Dùng PowerPoint COM để export từng slide → PNG (chính xác nhất).
-    2. Fallback: convert sang PDF qua COM rồi render bằng PyMuPDF.
-    3. Fallback cuối: dùng python-pptx lấy text outline (không có ảnh đẹp).
+    Render PPTX thành list SlideInfo (có hình ảnh PNG gốc sắc nét và thông tin GIF đè).
     """
     pptx_path = str(Path(pptx_path).resolve())
 
@@ -99,26 +96,39 @@ def load_pptx(
         if progress_cb:
             progress_cb(pct, msg)
 
-    _report(0, "Đang mở file PPTX…")
+    _report(0, "Đang mở file PPTX...")
 
     try:
         return _pptx_via_com_export_slides(pptx_path, _report)
     except Exception as e1:
-        _report(10, f"COM export slides thất bại ({e1}), thử convert PDF…")
+        _report(10, f"COM export slides thất bại ({e1}), thử convert PDF...")
         try:
             return _pptx_via_com_to_pdf(pptx_path, _report)
         except Exception as e2:
-            _report(20, f"COM PDF thất bại ({e2}), dùng fallback text…")
+            _report(20, f"COM PDF thất bại ({e2}), dùng fallback text...")
             return _pptx_fallback_text(pptx_path, _report)
 
 
-def _pptx_via_com_export_slides(
+def _pptx_via_com_export_video(
     pptx_path: str,
     report: Callable[[int, str], None],
 ) -> List[SlideInfo]:
-    """Dùng PowerPoint COM ExportAsFixedFormat hoặc Export(ppSaveAsPNG)."""
+    """Sử dụng PowerPoint COM để xuất presentation thành video MP4, rồi cắt thành từng slide."""
     import comtypes.client  # type: ignore
     import comtypes
+    import time
+    import subprocess
+    import sys
+    import shutil
+
+    # Tìm đường dẫn tuyệt đối tới ffmpeg
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        possible_ffmpeg = os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe")
+        if os.path.exists(possible_ffmpeg):
+            ffmpeg_bin = possible_ffmpeg
+        else:
+            ffmpeg_bin = "ffmpeg"
 
     try:
         comtypes.CoInitialize()
@@ -127,30 +137,73 @@ def _pptx_via_com_export_slides(
 
     out_dir = _temp_dir()
     pptx_abs = str(Path(pptx_path).resolve())
+    temp_video_path = os.path.join(out_dir, "full_presentation.mp4")
 
-    report(5, "Kết nối PowerPoint…")
+    report(5, "Đang kết nối PowerPoint...")
     ppt_app = None
     try:
         ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
-        ppt_app.Visible = 1  # phải visible để render đúng
+        # ppt_app.Visible = 1
         prs = ppt_app.Presentations.Open(pptx_abs, ReadOnly=True, WithWindow=False)
         slide_count = prs.Slides.Count
-        report(10, f"Đang render {slide_count} slide…")
+        report(10, f"Đang yêu cầu PowerPoint xuất {slide_count} slide thành video (quá trình này mất khoảng 20-40s)...")
 
-        # Export từng slide dưới dạng PNG
-        WIDTH  = 1280
-        HEIGHT = 720
+        # 5.0 giây cho mỗi slide làm mốc thời lượng cố định để cắt
+        SLIDE_DUR = 5.0
 
+        # CreateVideo(FileName, UseSlidesAndTimings, DefaultSlideDuration, Resolution, FrameRate, Quality)
+        # UseSlidesAndTimings=False để ép tất cả slide đều dài SLIDE_DUR giây
+        prs.CreateVideo(temp_video_path, False, int(SLIDE_DUR), 720, 30, 85)
+
+        # Chờ xuất video hoàn thành
+        start_wait = time.time()
+        while True:
+            if time.time() - start_wait > 300:  # Timeout 5 phút
+                raise RuntimeError("PowerPoint xuất video bị quá thời gian chờ (5 phút).")
+
+            status = prs.CreateVideoStatus
+            if status == 3:  # Done
+                break
+            elif status == 4:  # Failed
+                raise RuntimeError("PowerPoint COM báo lỗi xuất video.")
+
+            elapsed = int(time.time() - start_wait)
+            report(15 + min(50, elapsed), f"Đang xuất video slide ({elapsed}s)...")
+            time.sleep(1.0)
+
+        report(70, f"Đang cắt video lớn thành các slide riêng biệt…")
+        
         slides: List[SlideInfo] = []
         titles = _extract_pptx_titles(pptx_path)
 
         for i in range(1, slide_count + 1):
+            start_time = (i - 1) * SLIDE_DUR
+            slide_video_path = os.path.join(out_dir, f"slide_{i:04d}.mp4")
             img_path = os.path.join(out_dir, f"slide_{i:04d}.png")
-            slide = prs.Slides(i)
-            slide.Export(img_path, "PNG", Width=WIDTH, Height=HEIGHT)
+
+            # Cắt phân đoạn video
+            subprocess.run([
+                ffmpeg_bin, "-y", "-ss", f"{start_time:.2f}", "-t", f"{SLIDE_DUR:.2f}",
+                "-i", temp_video_path,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
+                slide_video_path
+            ], capture_output=True)
+
+            # Xuất 1 frame làm ảnh đại diện/thumbnail
+            subprocess.run([
+                ffmpeg_bin, "-y", "-ss", "00:00:01.00", "-i", slide_video_path,
+                "-vframes", "1", "-vf", "scale=320:-1", img_path
+            ], capture_output=True)
+
             title = titles[i - 1] if (i - 1) < len(titles) else ""
-            slides.append(SlideInfo(index=i - 1, image_path=img_path, title=title))
-            pct = 10 + int(85 * i / slide_count)
+            slides.append(SlideInfo(
+                index=i - 1,
+                image_path=img_path,
+                video_path=slide_video_path,
+                title=title
+            ))
+            
+            pct = 70 + int(25 * i / slide_count)
             report(pct, f"Slide {i}/{slide_count}…")
 
         prs.Close()
@@ -165,7 +218,113 @@ def _pptx_via_com_export_slides(
         except Exception:
             pass
 
-    report(100, f"Đã render {len(slides)} slide.")
+    # Xóa file video gốc tạm thời
+    if os.path.exists(temp_video_path):
+        try:
+            os.remove(temp_video_path)
+        except Exception:
+            pass
+
+    report(100, f"Đã chuẩn bị {len(slides)} slide dạng video thành công.")
+    return slides
+
+
+def _pptx_via_com_export_slides(
+    pptx_path: str,
+    report: Callable[[int, str], None],
+) -> List[SlideInfo]:
+    """Dùng PowerPoint COM Export để kết xuất ảnh PNG gốc và trích xuất ảnh GIF nhúng bằng python-pptx."""
+    import comtypes.client  # type: ignore
+    import comtypes
+    import time
+
+    try:
+        comtypes.CoInitialize()
+    except Exception:
+        pass
+
+    out_dir = _temp_dir()
+    pptx_abs = str(Path(pptx_path).resolve())
+
+    report(5, "Kết nối PowerPoint...")
+    ppt_app = None
+    try:
+        ppt_app = comtypes.client.CreateObject("PowerPoint.Application")
+        ppt_app.Visible = 1  # phải visible để render đúng
+        prs = ppt_app.Presentations.Open(pptx_abs, ReadOnly=True, WithWindow=False)
+        slide_count = prs.Slides.Count
+        report(10, f"Đang kết xuất {slide_count} slide ảnh gốc sắc nét...")
+
+        # Trích xuất thông tin ảnh GIF bằng python-pptx
+        slide_gifs_map = {}
+        try:
+            from pptx import Presentation
+            pptx_prs = Presentation(pptx_path)
+            prs_w = pptx_prs.slide_width
+            prs_h = pptx_prs.slide_height
+
+            for idx, pptx_slide in enumerate(pptx_prs.slides):
+                gifs = []
+                for shape in pptx_slide.shapes:
+                    shape_type = getattr(shape, "shape_type", 0)
+                    # 13 là MSO_SHAPE_TYPE.PICTURE
+                    if shape_type == 13:
+                        try:
+                            img = shape.image
+                            if img.ext.lower() == "gif":
+                                gif_filename = f"slide_{idx:04d}_gif_{len(gifs)}.gif"
+                                gif_path = os.path.join(out_dir, gif_filename)
+                                with open(gif_path, "wb") as f:
+                                    f.write(img.blob)
+
+                                x_rel = shape.left / prs_w
+                                y_rel = shape.top / prs_h
+                                w_rel = shape.width / prs_w
+                                h_rel = shape.height / prs_h
+
+                                gifs.append({
+                                    "gif_path": gif_path,
+                                    "x_rel": x_rel,
+                                    "y_rel": y_rel,
+                                    "w_rel": w_rel,
+                                    "h_rel": h_rel
+                                })
+                        except Exception as ex:
+                            print(f"Lỗi trích xuất GIF: {ex}")
+                if gifs:
+                    slide_gifs_map[idx] = gifs
+        except Exception as ex:
+            print(f"Lỗi phân tích python-pptx: {ex}")
+
+        slides: List[SlideInfo] = []
+        titles = _extract_pptx_titles(pptx_path)
+
+        for i in range(1, slide_count + 1):
+            img_path = os.path.join(out_dir, f"slide_{i:04d}.png")
+            slide = prs.Slides(i)
+            # slide.Export xuất ảnh gốc cực kỳ sắc nét của PowerPoint
+            slide.Export(img_path, "PNG")
+            title = titles[i - 1] if (i - 1) < len(titles) else ""
+            
+            gifs = slide_gifs_map.get(i - 1, [])
+            slides.append(SlideInfo(index=i - 1, image_path=img_path, title=title, gifs=gifs))
+            
+            pct = 10 + int(85 * i / slide_count)
+            report(pct, f"Slide {i}/{slide_count}...")
+
+        prs.Close()
+    finally:
+        if ppt_app:
+            try:
+                ppt_app.Quit()
+            except Exception:
+                pass
+        try:
+            comtypes.CoUninitialize()
+        except Exception:
+            pass
+
+    report(100, f"Đã kết xuất {len(slides)} slide sắc nét.")
     return slides
 
 

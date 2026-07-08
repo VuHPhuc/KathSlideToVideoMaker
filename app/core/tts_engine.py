@@ -51,6 +51,22 @@ VI_MALE_MODELS: Dict[str, Dict[str, Any]] = {
         "multi_speaker": False,
         "default_speaker": 0,
     },
+    "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam TikTok - Trầm ấm Review)": {
+        "engine": "edge",
+        "voice": "vi-VN-NamMinhNeural",
+        "pitch": "-12Hz",
+        "description": "Giọng Nam trầm ấm chuẩn Review phim TikTok, YouTube Short. Giọng dày, cuốn hút và rất tự nhiên.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
+    "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam TikTok - Siêu Trầm Cinematic)": {
+        "engine": "edge",
+        "voice": "vi-VN-NamMinhNeural",
+        "pitch": "-18Hz",
+        "description": "Giọng Nam siêu trầm, cực kỳ dày tiếng, tạo độ kịch tính, bí ẩn giống các kênh review phim TikTok chuyên nghiệp.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
     "Edge-TTS vi-VN-HoaiMyNeural (Giọng Nữ - Rất hay)": {
         "engine": "edge",
         "voice": "vi-VN-HoaiMyNeural",
@@ -63,6 +79,14 @@ VI_MALE_MODELS: Dict[str, Dict[str, Any]] = {
         "voice": "vi-VN-HoaiMyNeural",
         "pitch": "-4Hz",
         "description": "Giọng đọc Nữ Neural của Microsoft với cao độ hạ thấp nhẹ (-4Hz) tạo cảm giác giọng nữ ấm áp, dịu dàng.",
+        "multi_speaker": False,
+        "default_speaker": 0,
+    },
+    "Edge-TTS vi-VN-HoaiMyNeural (Giọng Nữ TikTok - Trầm Dày)": {
+        "engine": "edge",
+        "voice": "vi-VN-HoaiMyNeural",
+        "pitch": "-10Hz",
+        "description": "Giọng Nữ trầm ấm, dày tiếng hơn, tạo cảm giác thuyết minh phim chuyên nghiệp trên các kênh TikTok.",
         "multi_speaker": False,
         "default_speaker": 0,
     },
@@ -240,6 +264,10 @@ class TTSEngine:
             voice = info["voice"]
             temp_mp3 = output_wav_path + ".temp.mp3"
 
+            # Thay thế dấu kết câu thành dấu phẩy để có điểm dừng nghỉ cực ngắn (comma-style pause)
+            import re
+            tts_text = re.sub(r"[.!?…]+", ",", text)
+
             # Ánh xạ tốc độ đọc (ví dụ: speed = 1.3 -> +30%)
             rate_pct = round((speed - 1.0) * 100)
             rate_str = f"+{rate_pct}%" if rate_pct >= 0 else f"{rate_pct}%"
@@ -248,9 +276,9 @@ class TTSEngine:
             async def run_edge():
                 # Chỉ truyền tham số pitch nếu có cấu hình trầm
                 if pitch_str:
-                    communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
+                    communicate = edge_tts.Communicate(tts_text, voice, rate=rate_str, pitch=pitch_str)
                 else:
-                    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+                    communicate = edge_tts.Communicate(tts_text, voice, rate=rate_str)
                 await communicate.save(temp_mp3)
 
             # Thêm độ trễ nhỏ để tránh bị rate limit từ máy chủ Edge (tăng lên 0.5s để đảm bảo ổn định)
@@ -299,8 +327,13 @@ class TTSEngine:
         # Ánh xạ tốc độ đọc sang length_scale (speed = 1.3 -> length_scale = 1.0 / 1.3 = 0.77)
         length_scale = 1.0 / max(0.1, speed)
         syn_config = SynthesisConfig(speaker_id=speaker_id, length_scale=length_scale)
+        
+        # Thay thế dấu kết câu thành dấu phẩy để có điểm dừng nghỉ cực ngắn (comma-style pause)
+        import re
+        tts_text = re.sub(r"[.!?…]+", ",", text)
+        
         with wave.open(output_wav_path, "wb") as wav_file:
-            self._voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+            self._voice.synthesize_wav(tts_text, wav_file, syn_config=syn_config)
 
     # ── Speaker info ────────────────────────────────────────────────────────
 

@@ -55,8 +55,8 @@ class ExportPipeline:
     5. Lưu JSON timestamps
     """
 
-    SILENCE_BETWEEN_SENTENCES_MS = 400   # ms lặng giữa các câu
-    SILENCE_BETWEEN_PARAGRAPHS_MS = 700  # ms lặng giữa đoạn văn
+    SILENCE_BETWEEN_SENTENCES_MS = 150   # ms lặng ngắn giữa các câu để có điểm dừng nhẹ
+    SILENCE_BETWEEN_PARAGRAPHS_MS = 250  # ms lặng ngắn giữa đoạn văn
 
     def __init__(self):
         self._whisper_model = None

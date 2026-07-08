@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QVBoxLayout, QWidget, QProgressBar,
     QToolButton, QGridLayout, QTextEdit, QCheckBox, QComboBox,
-    QSlider, QSpinBox, QDoubleSpinBox,
+    QSlider, QSpinBox, QDoubleSpinBox, QDialog,
 )
 
 from app.core.slide_processor import (
@@ -471,6 +471,124 @@ class AudioMixPanel(QFrame):
         if self._item:
             self._item.video_volume = v / 100.0
         self.changed.emit()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TRANSITION SELECTION DIALOG
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TransitionSelectionDialog(QDialog):
+    """Dialog cho phép người dùng chọn loại và thời lượng chuyển cảnh tự động."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Chọn Transition")
+        self.setMinimumWidth(320)
+        self.setStyleSheet("""
+            QDialog {
+                background: #161b22;
+                color: #c9d1d9;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QLabel {
+                font-size: 13px;
+                color: #8b949e;
+                font-weight: 500;
+            }
+            QComboBox {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QDoubleSpinBox {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 13px;
+            }
+            QPushButton {
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            QPushButton#ok_btn {
+                background: #6d28d9;
+                color: white;
+                border: none;
+            }
+            QPushButton#ok_btn:hover {
+                background: #7c3aed;
+            }
+            QPushButton#cancel_btn {
+                background: #21262d;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+            }
+            QPushButton#cancel_btn:hover {
+                background: #30363d;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # Loại chuyển cảnh
+        layout.addWidget(QLabel("Loại chuyển cảnh:"))
+        self.type_combo = QComboBox()
+        
+        from app.models.media_item import TRANSITION_TYPES
+        for display, key in TRANSITION_TYPES:
+            display_name = display
+            if not display_name.startswith("✦"):
+                display_name = f"✦  {display_name}"
+            self.type_combo.addItem(display_name, key)
+            
+        # Chọn fade theo mặc định
+        index = self.type_combo.findData("fade")
+        if index >= 0:
+            self.type_combo.setCurrentIndex(index)
+            
+        layout.addWidget(self.type_combo)
+
+        # Thời lượng
+        layout.addWidget(QLabel("Thời lượng (giây):"))
+        self.dur_spin = QDoubleSpinBox()
+        self.dur_spin.setRange(0.1, 10.0)
+        self.dur_spin.setSingleStep(0.1)
+        self.dur_spin.setValue(0.5)
+        self.dur_spin.setDecimals(2)
+        self.dur_spin.setSuffix(" s")
+        layout.addWidget(self.dur_spin)
+
+        layout.addSpacing(10)
+
+        # Buttons (OK bên trái, Cancel bên phải giống mockup)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.setObjectName("ok_btn")
+        self.ok_btn.clicked.connect(self.accept)
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("cancel_btn")
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.ok_btn)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def get_values(self) -> tuple[str, float]:
+        return self.type_combo.currentData(), self.dur_spin.value()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1089,22 +1207,27 @@ class SlideSyncTab(QWidget):
             QMessageBox.information(self, "Thông báo", "Cần ít nhất 2 clip để gán chuyển cảnh.")
             return
 
-        from app.models.media_item import TRANSITION_TYPES
-        default_type = "fade"
-        for display, key in TRANSITION_TYPES:
-            if key != "none":
-                default_type = key
-                break
+        dlg = TransitionSelectionDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            trans_type, trans_dur = dlg.get_values()
 
-        for item in self._media_items[1:]:
-            item.transition_in = default_type
-            item.transition_dur = 0.5
+            for item in self._media_items[1:]:
+                item.transition_in = trans_type
+                item.transition_dur = trans_dur
 
-        self._rebuild_timeline()
-        QMessageBox.information(
-            self, "✓ Hoàn thành",
-            f"Đã tự động gán chuyển cảnh '{default_type}' (0.5s) cho tất cả phân đoạn!"
-        )
+            self._rebuild_timeline()
+            
+            from app.models.media_item import TRANSITION_TYPES
+            display_name = trans_type
+            for display, key in TRANSITION_TYPES:
+                if key == trans_type:
+                    display_name = display
+                    break
+
+            QMessageBox.information(
+                self, "✓ Hoàn thành",
+                f"Đã tự động gán chuyển cảnh '{display_name}' ({trans_dur:.2f}s) cho tất cả phân đoạn!"
+            )
 
     def _clear_all(self):
         if not self._media_items:

@@ -1,5 +1,5 @@
 """
-KathTTS Studio — Entry Point
+KathFlow Studio — Entry Point
 Slide To Video Project: Text → MP3 with Word Timestamps
 """
 
@@ -29,7 +29,7 @@ def main():
     qInstallMessageHandler(message_handler)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("KathTTS Studio")
+    app.setApplicationName("KathFlow Studio")
     app.setOrganizationName("KathSlideToVideo")
 
     # Apply base font

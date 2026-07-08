@@ -442,7 +442,7 @@ class DropZoneWidget(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("KathTTS Studio — Slide To Video")
+        self.setWindowTitle("KathFlow Studio — Slide To Video")
         self.setMinimumSize(960, 640)
         self.resize(1180, 740)
         self.setStyleSheet(STYLESHEET)
@@ -520,7 +520,7 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(hdr)
         lay.setContentsMargins(20, 0, 20, 0)
 
-        title = QLabel("🎙️  KathTTS Studio")
+        title = QLabel("🎬  KathFlow Studio")
         title.setStyleSheet(
             "font-size: 17px; font-weight: 700; color: #e6edf3; background:transparent;"
         )

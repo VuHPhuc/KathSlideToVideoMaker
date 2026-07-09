@@ -242,6 +242,27 @@ class TTSEngine:
         speed: float = 1.0,
     ) -> None:
         """Tổng hợp giọng nói từ text, lưu ra file WAV."""
+        # Chuẩn hóa văn bản: xử lý dấu chấm phân cách hàng nghìn (ví dụ 1.500 -> 1500)
+        # và viết rõ các đơn vị đo lường thông dụng
+        import re
+        normalized_text = text
+        
+        # 1. Loại bỏ dấu chấm phân cách hàng nghìn (ví dụ: 1.500 -> 1500, 1.500.000 -> 1500000)
+        def remove_thousands_dots(match):
+            return match.group(0).replace(".", "")
+        normalized_text = re.sub(r"\b\d{1,3}(\.\d{3})+(?!\d)", remove_thousands_dots, normalized_text)
+        
+        # 2. Viết rõ đơn vị tốc độ "km/h", "kmh" -> "ki-lô-mét trên giờ"
+        normalized_text = re.sub(r"\bkm/?h\b|(?<=\d)km/?h\b", "ki-lô-mét trên giờ", normalized_text, flags=re.IGNORECASE)
+        
+        # 3. Viết rõ đơn vị tốc độ "m/s", "ms" -> "mét trên giây"
+        normalized_text = re.sub(r"\bm/?s\b|(?<=\d)m/?s\b", "mét trên giây", normalized_text, flags=re.IGNORECASE)
+        
+        # 4. Viết rõ viết tắt đơn vị "km" -> "ki-lô-mét"
+        normalized_text = re.sub(r"\bkm\b|(?<=\d)km\b", "ki-lô-mét", normalized_text, flags=re.IGNORECASE)
+
+        text = normalized_text
+
         # Kiểm tra nếu text không có ký tự chữ hoặc số nào (ví dụ chỉ có dấu câu)
         if not any(c.isalnum() for c in text):
             from pydub import AudioSegment

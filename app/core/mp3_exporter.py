@@ -16,6 +16,26 @@ WHISPER_CACHE = Path(__file__).parent.parent / "models" / "whisper"
 WHISPER_CACHE.mkdir(parents=True, exist_ok=True)
 
 
+def trim_silence(sound: AudioSegment, silence_threshold: float = -45.0, chunk_size: int = 10) -> AudioSegment:
+    """Cắt bỏ khoảng lặng ở đầu và cuối của AudioSegment."""
+    if len(sound) < chunk_size:
+        return sound
+    if sound.max_dBFS < silence_threshold:
+        return sound
+
+    # Cắt khoảng lặng ở đầu
+    start_trim = 0
+    while start_trim < len(sound) and sound[start_trim : start_trim + chunk_size].dBFS < silence_threshold:
+        start_trim += chunk_size
+
+    # Cắt khoảng lặng ở cuối
+    end_trim = len(sound)
+    while end_trim > start_trim and sound[end_trim - chunk_size : end_trim].dBFS < silence_threshold:
+        end_trim -= chunk_size
+
+    return sound[start_trim:end_trim]
+
+
 # ── Text splitting ──────────────────────────────────────────────────────────
 
 def split_into_sentences(text: str) -> List[str]:
@@ -136,6 +156,7 @@ class ExportPipeline:
                 tts_engine.synthesize(sentence, wav_path, speaker_id, speed=speed)
 
                 seg = AudioSegment.from_wav(wav_path)
+                seg = trim_silence(seg)
                 wav_segments.append(seg)
                 sentence_durations_ms.append(len(seg))
 

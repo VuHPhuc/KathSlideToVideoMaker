@@ -675,13 +675,12 @@ def export_video_with_media(
 
     # Gán duration cho items từ TTS hoặc tự động lấy từ file gốc
     for m_item in media_items:
-        if m_item.is_assigned:
+        if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
+            m_item.duration_sec = _get_video_duration(m_item.path)
+        elif m_item.is_assigned:
             entry = tts_map.get(m_item.id)
             if entry:
                 m_item.duration_sec = max(0.1, entry.duration_sec)
-        else:
-            if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
-                m_item.duration_sec = _get_video_duration(m_item.path)
 
     _rep(12, f"Đang chuẩn bị {len(media_items)} clip…")
 
@@ -700,9 +699,17 @@ def export_video_with_media(
 
             clip_out = os.path.join(tmp, f"clip_{i:04d}.mp4")
 
+            # Tính extra_dur nếu clip tiếp theo có transition_in
+            extra_dur = 0.0
+            if i + 1 < len(media_items):
+                next_item = media_items[i + 1]
+                next_trans_type = getattr(next_item, "transition_in", "none")
+                if next_trans_type != "none":
+                    extra_dur = getattr(next_item, "transition_dur", 0.5)
+
             if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
-                # Cắt video đúng thời lượng nếu được gán
-                duration_to_use = m_item.duration_sec if m_item.is_assigned else None
+                # Cắt video đúng thời lượng nếu được gán + phần bù transition
+                duration_to_use = (m_item.duration_sec + extra_dur) if m_item.is_assigned else None
                 _normalize_video(m_item.path, clip_out, W, H, fps, duration=duration_to_use)
                 has_audio.append(True)
                 video_vols.append(m_item.video_volume)
@@ -716,7 +723,7 @@ def export_video_with_media(
                     _make_black_image(placeholder, W, H)
                     img_path = placeholder
 
-                dur = max(0.1, m_item.duration_sec)
+                dur = max(0.1, m_item.duration_sec) + extra_dur
 
                 # Kiểm tra slide có chứa ảnh GIF động không
                 gifs = []
@@ -981,21 +988,34 @@ def _mix_audio(merged_video: str, mp3_path: str, media_items,
     """
     import shutil as _sh
 
+    video_dur = _get_video_duration(merged_video)
+
+    # Tính thời điểm bắt đầu thực tế của từng clip trong video sau khi ghép (có transition)
+    clip_start_times = []
+    cumulative_dur = 0.0
+    for i, m in enumerate(media_items):
+        if i == 0:
+            clip_start_times.append(0.0)
+            cumulative_dur = clip_durs[0]
+        else:
+            trans_type = getattr(m, "transition_in", "none")
+            trans_dur = getattr(m, "transition_dur", 0.5) if trans_type != "none" else 0.0
+            start_time = max(0.0, cumulative_dur - trans_dur)
+            clip_start_times.append(start_time)
+            cumulative_dur = cumulative_dur + clip_durs[i] - trans_dur
+
     # Tính offset của TTS audio trong final video
     tts_start_sec = 0.0
     for i, m in enumerate(media_items):
         if m.is_assigned:
+            tts_start_sec = clip_start_times[i]
             break
-        tts_start_sec += clip_durs[i] if i < len(clip_durs) else m.duration_sec
 
     # Thu thập video clips có audio
     video_audio_clips: List[tuple[int, float]] = []  # (media_idx, start_sec)
-    cur_sec = 0.0
     for i, m in enumerate(media_items):
-        d = clip_durs[i] if i < len(clip_durs) else m.duration_sec
         if m.media_type == "video" and has_audio[i]:
-            video_audio_clips.append((i, cur_sec))
-        cur_sec += d
+            video_audio_clips.append((i, clip_start_times[i]))
 
     has_tts  = mp3_path and Path(mp3_path).exists()
     has_vids = len(video_audio_clips) > 0
@@ -1068,10 +1088,20 @@ def _mix_audio(merged_video: str, mp3_path: str, media_items,
     else:
         cmd += ["-map", "0:v", "-map", out_audio]
 
+    has_video_items = any(
+        m.media_type == "video" or m.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv"))
+        for m in media_items
+    )
+
     cmd += [
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
+    ]
+    if has_video_items:
+        cmd += ["-t", f"{video_dur:.3f}"]
+    else:
+        cmd += ["-shortest"]
+    cmd += [
         "-movflags", "+faststart",
         output,
     ]

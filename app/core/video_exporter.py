@@ -591,19 +591,59 @@ def _make_slide_with_gif_video(img_path: str, gifs: list, dst: str, duration: fl
         )
 
 
+def _has_audio(path: str) -> bool:
+    """Kiểm tra xem file video có track audio không."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_type",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             path],
+            capture_output=True, text=True,
+        )
+        return "audio" in r.stdout
+    except Exception:
+        return False
+
+
 def _normalize_video(src: str, dst: str, W: int, H: int, fps: int, duration: Optional[float] = None):
-    """Chuẩn hóa video về cùng resolution/fps, giữ audio gốc. Có thể cắt ngắn theo duration."""
+    """Chuẩn hóa video về cùng resolution/fps, giữ audio gốc. Có thể cắt ngắn hoặc kéo dài (atempo/setpts) theo duration."""
+    source_dur = _get_video_duration(src)
+    has_audio_stream = _has_audio(src)
+    
+    vf_filters = [
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease",
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black",
+        f"fps={fps}"
+    ]
+    af_filters = []
+    
+    # Nếu duration được yêu cầu lớn hơn duration thực tế của video, dùng setpts và atempo để làm chậm video
+    if duration is not None and duration > source_dur and source_dur > 0.1:
+        speed_factor = source_dur / duration
+        speed_factor = max(0.5, min(2.0, speed_factor))
+        vf_filters.append(f"setpts=PTS/{speed_factor:.4f}")
+        if has_audio_stream:
+            af_filters.append(f"atempo={speed_factor:.4f}")
+        
     cmd = [
         "ffmpeg", "-y", "-i", src,
     ]
     if duration is not None:
         cmd += ["-t", f"{duration:.3f}"]
+        
+    cmd += ["-vf", ",".join(vf_filters)]
+    
+    if has_audio_stream:
+        if af_filters:
+            cmd += ["-af", ",".join(af_filters)]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-an"]
+        
     cmd += [
-        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,fps={fps}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
         dst,
     ]
     result = subprocess.run(cmd, capture_output=True)
@@ -708,8 +748,8 @@ def export_video_with_media(
                     extra_dur = getattr(next_item, "transition_dur", 0.5)
 
             if m_item.media_type == "video" or m_item.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
-                # Cắt video đúng thời lượng nếu được gán + phần bù transition
-                duration_to_use = (m_item.duration_sec + extra_dur) if m_item.is_assigned else None
+                # Cắt video đúng thời lượng + phần bù transition
+                duration_to_use = m_item.duration_sec + extra_dur
                 _normalize_video(m_item.path, clip_out, W, H, fps, duration=duration_to_use)
                 has_audio.append(True)
                 video_vols.append(m_item.video_volume)
@@ -859,7 +899,7 @@ def export_video_with_media(
         final_output = output_path
 
         _mix_audio(
-            tmp_video, mp3_path, media_items, clip_durs,
+            tmp_video, mp3_path, media_items, clip_paths, clip_durs,
             has_audio, video_vols, tts_vols, final_output,
         )
 
@@ -868,6 +908,7 @@ def export_video_with_media(
 
 
 # ─── Helpers cho export_video_with_media ────────────────────────────────────
+
 
 def _make_black_image(path: str, W: int, H: int):
     """Tạo ảnh đen placeholder bằng ffmpeg."""
@@ -978,7 +1019,7 @@ def _merge_with_xfade(clip_paths: List[str], media_items,
 
 
 def _mix_audio(merged_video: str, mp3_path: str, media_items,
-               clip_durs: List[float], has_audio: List[bool],
+               clip_paths: List[str], clip_durs: List[float], has_audio: List[bool],
                video_vols: List[float], tts_vols: List[float],
                output: str):
     """
@@ -1014,8 +1055,10 @@ def _mix_audio(merged_video: str, mp3_path: str, media_items,
     # Thu thập video clips có audio
     video_audio_clips: List[tuple[int, float]] = []  # (media_idx, start_sec)
     for i, m in enumerate(media_items):
-        if m.media_type == "video" and has_audio[i]:
-            video_audio_clips.append((i, clip_start_times[i]))
+        is_vid = m.media_type == "video" or m.path.lower().endswith((".mp4", ".avi", ".mov", ".mkv"))
+        if is_vid and has_audio[i]:
+            if _has_audio(clip_paths[i]):
+                video_audio_clips.append((i, clip_start_times[i]))
 
     has_tts  = mp3_path and Path(mp3_path).exists()
     has_vids = len(video_audio_clips) > 0
@@ -1053,7 +1096,7 @@ def _mix_audio(merged_video: str, mp3_path: str, media_items,
     for media_idx, start_sec in video_audio_clips:
         delay_ms = int(start_sec * 1000)
         vol      = video_vols[media_idx] if media_idx < len(video_vols) else 0.3
-        vid_path = media_items[media_idx].path
+        vid_path = clip_paths[media_idx]  # Dùng file đã chuẩn hóa & tpad cắt đúng thời lượng
 
         inputs += ["-i", vid_path]
         label   = f"[vid_a{input_idx}]"

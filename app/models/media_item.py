@@ -33,7 +33,7 @@ class MediaItem:
         self.thumbnail_path: Optional[str] = None
         self.slide_info = slide_info  # Backward compatibility for SlideInfo
         
-        self.transition_in: str = "none"
+        self.transition_in: str = "fade"
         self.transition_dur: float = 0.5
         
         self.video_volume: float = 0.3 if media_type == "video" else 1.0

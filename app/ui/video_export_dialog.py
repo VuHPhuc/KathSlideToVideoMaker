@@ -323,6 +323,26 @@ class ExportVideoDialog(QDialog):
             QMessageBox.warning(self, "Thiếu đường dẫn", "Vui lòng chọn nơi lưu file.")
             return
 
+        # Kiểm tra trùng lặp file và tự động đổi tên thành _2
+        out_path = Path(output)
+        if out_path.exists():
+            parent = out_path.parent
+            stem = out_path.stem
+            suffix = out_path.suffix
+            counter = 2
+            new_path = out_path
+            while new_path.exists():
+                new_path = parent / f"{stem}_{counter}{suffix}"
+                counter += 1
+            
+            QMessageBox.warning(
+                self, "Trùng tên file",
+                f"File '{out_path.name}' đã tồn tại.\n"
+                f"Đường dẫn đã tự động được đổi tên thành '{new_path.name}' để tránh ghi đè.",
+            )
+            output = str(new_path)
+            self._out_edit.setText(output)
+
         # Nếu không có JSON → dùng fallback estimation
         json_path = self.json_path if (self.json_path and Path(self.json_path).exists()) else ""
 

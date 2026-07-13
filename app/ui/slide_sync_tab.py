@@ -974,7 +974,7 @@ class SlideSyncTab(QWidget):
         """)
         clear_btn.clicked.connect(self._clear_all)
 
-        auto_trans_btn = QPushButton("✦  Tự động chuyển cảnh")
+        auto_trans_btn = QPushButton("✦  Chuyển cảnh all")
         auto_trans_btn.setFixedHeight(24)
         auto_trans_btn.setStyleSheet("""
             QPushButton {

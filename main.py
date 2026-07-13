@@ -20,6 +20,14 @@ from app.ui.main_window import MainWindow
 
 
 def main():
+    # Force taskbar icon to show correctly on Windows
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("KathTTS.KathSlideToVideoMaker.v1")
+        except Exception:
+            pass
+
     # Suppress harmless FFmpeg/MP3 and QFont console warnings
     from PyQt6.QtCore import qInstallMessageHandler
     def message_handler(msg_type, context, msg_string):

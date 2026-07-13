@@ -98,12 +98,12 @@ QPushButton#danger:hover { background-color: #dc2626; }
 
 /* ── Inputs ── */
 QPlainTextEdit {
-    background-color: #0d1117;
+    background-color: #161b22;
     border: 1px solid #30363d;
     border-radius: 8px;
     color: #e6edf3;
     font-size: 14px;
-    padding: 10px;
+    padding: 12px;
     line-height: 1.6;
     selection-background-color: #6d28d9;
 }
@@ -357,6 +357,10 @@ class DropZoneWidget(QFrame):
             background-color: #161b22;
             border: 2px dashed #30363d;
             border-radius: 12px;
+        }
+        QFrame#dropZone:hover {
+            border-color: #6d28d9;
+            background-color: #1c182a;
         }
     """
     _STYLE_HOVER = """
@@ -628,11 +632,10 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # Tắt scrollbar ngang
 
         lay = QVBoxLayout(container)
-        lay.setContentsMargins(8, 16, 16, 16)
+        lay.setContentsMargins(8, 16, 24, 16)
         lay.setSpacing(14)
 
         lay.addWidget(self._build_card_voice())
-        lay.addWidget(self._build_card_whisper())
         lay.addWidget(self._build_card_export())
         lay.addWidget(self._build_card_skip_to_slide())
         lay.addStretch()
@@ -698,13 +701,21 @@ class MainWindow(QMainWindow):
         lay.addWidget(sep)
         lay.addSpacing(4)
 
-        # Speaker combo
-        lay.addWidget(self._make_label("Người đọc (Speaker ID):"))
+        # Speaker and Speed row
+        param_row = QHBoxLayout()
+        
+        # Column 1: Speaker
+        col1 = QVBoxLayout()
+        col1.setSpacing(4)
+        col1.addWidget(self._make_label("Người đọc (Speaker ID):"))
         self._speaker_combo = QComboBox()
-        lay.addWidget(self._speaker_combo)
+        col1.addWidget(self._speaker_combo)
+        param_row.addLayout(col1, 1)
 
-        # Speed combo
-        lay.addWidget(self._make_label("Tốc độ đọc:"))
+        # Column 2: Speed
+        col2 = QVBoxLayout()
+        col2.setSpacing(4)
+        col2.addWidget(self._make_label("Tốc độ đọc:"))
         self._speed_combo = QComboBox()
         speeds = [
             ("0.8x", 0.8),
@@ -730,9 +741,12 @@ class MainWindow(QMainWindow):
             self._speed_combo.setCurrentIndex(idx)
         else:
             self._speed_combo.setCurrentIndex(2)  # Default to 1.0x
-
+        
         self._speed_combo.currentTextChanged.connect(self._save_speed_setting)
-        lay.addWidget(self._speed_combo)
+        col2.addWidget(self._speed_combo)
+        param_row.addLayout(col2, 1)
+
+        lay.addLayout(param_row)
 
         note = QLabel("💡 Preview để tìm giọng Nam phù hợp.")
         note.setStyleSheet("color: #484f58; font-size: 11px; background:transparent;")
@@ -745,35 +759,6 @@ class MainWindow(QMainWindow):
 
         return card
 
-    # ── Card: Whisper ────────────────────────────────────────────────────
-
-    def _build_card_whisper(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("card")
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(8)
-
-        h = QLabel("🕐  WORD TIMESTAMPS")
-        h.setObjectName("heading")
-        lay.addWidget(h)
-
-        self._whisper_check = QCheckBox("Phân tích timestamps từng từ (Whisper)")
-        self._whisper_check.setChecked(True)
-        lay.addWidget(self._whisper_check)
-
-        desc = QLabel(
-            "Dùng Whisper tiny (~75MB) để xác định thời điểm chính xác\n"
-            "từng từ trong audio — cần thiết cho slide timing."
-        )
-        desc.setStyleSheet("color: #7d8590; font-size: 11px; background:transparent;")
-        desc.setWordWrap(True)
-        lay.addWidget(desc)
-
-        return card
-
-    # ── Card: Export ─────────────────────────────────────────────────────
-
     def _build_card_export(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
@@ -781,11 +766,26 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(8)
 
-        h = QLabel("📤  XUẤT FILE")
+        h = QLabel("📤  XUẤT FILE & CẤU HÌNH")
         h.setObjectName("heading")
         lay.addWidget(h)
 
+        # Whisper setting (merged here)
+        self._whisper_check = QCheckBox("Phân tích timestamps từng từ (Whisper)")
+        self._whisper_check.setChecked(True)
+        lay.addWidget(self._whisper_check)
+
+        desc = QLabel(
+            "Phân tích mốc thời gian chi tiết cho từng từ để phục vụ đồng bộ hình ảnh slide chính xác."
+        )
+        desc.setStyleSheet("color: #7d8590; font-size: 11px; background:transparent; margin-left: 2px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        lay.addSpacing(4)
+
         # Output path row
+        lay.addWidget(self._make_label("Đường dẫn lưu file .mp3:"))
         out_row = QHBoxLayout()
         self._out_path = QLineEdit()
         self._out_path.setPlaceholderText("Chọn đường dẫn lưu file .mp3...")
@@ -803,14 +803,33 @@ class MainWindow(QMainWindow):
         default_path = str(Path(last_dir) / default_name)
         self._out_path.setText(default_path)
 
-        browse_btn = QPushButton("…")
-        browse_btn.setFixedWidth(36)
+        browse_btn = QPushButton("Duyệt...")
+        browse_btn.setFixedWidth(70)
+        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #21262d;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 4px 8px;
+                min-height: 26px;
+                max-height: 26px;
+            }
+            QPushButton:hover {
+                background-color: #30363d;
+                border-color: #8b5cf6;
+                color: #ffffff;
+            }
+        """)
         browse_btn.clicked.connect(self._browse_output)
         out_row.addWidget(self._out_path, 1)
         out_row.addWidget(browse_btn)
         lay.addLayout(out_row)
 
-        out_note = QLabel("File .json timestamps sẽ được tạo cùng thư mục với .mp3")
+        out_note = QLabel("Lưu ý: File .json timestamps sẽ tự động được tạo cùng thư mục.")
         out_note.setStyleSheet("color: #484f58; font-size: 11px; background:transparent;")
         out_note.setWordWrap(True)
         lay.addWidget(out_note)
@@ -818,8 +837,38 @@ class MainWindow(QMainWindow):
         lay.addSpacing(6)
 
         # Export button
-        self._export_btn = QPushButton("🎵  Xuất MP3")
-        self._export_btn.setObjectName("success")
+        self._export_btn = QPushButton("🎵  Tạo file âm thanh")
+        self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7c3aed, stop:1 #9333ea
+                );
+                color: #ffffff;
+                border: 1px solid #6d28d9;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 10px 20px;
+                min-height: 40px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #8b5cf6, stop:1 #a855f7
+                );
+                border-color: #a78bfa;
+            }
+            QPushButton:pressed {
+                background: #5b21b6;
+            }
+            QPushButton:disabled {
+                background: #1e2028;
+                color: #3d444d;
+                border: 1px solid #21262d;
+            }
+        """)
         self._export_btn.clicked.connect(self._start_export)
         lay.addWidget(self._export_btn)
 
@@ -987,6 +1036,10 @@ class MainWindow(QMainWindow):
             self._editor.setPlainText(text)
             fname = Path(path).name
             self._set_status(f"✓ Đã tải: {fname}")
+            
+            # Tự động cập nhật đường dẫn lưu MP3 trùng thư mục và tên của file kịch bản
+            new_mp3_path = str(Path(path).with_suffix(".mp3"))
+            self._out_path.setText(new_mp3_path)
         except Exception as exc:
             QMessageBox.critical(self, "Lỗi đọc file", str(exc))
 

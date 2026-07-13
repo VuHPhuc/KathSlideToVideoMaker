@@ -12,15 +12,15 @@ from PyQt6.QtGui import QColor, QPixmap, QPainter, QFont, QCursor, QDrag
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QScrollArea,
     QFrame, QToolButton, QDialog, QDialogButtonBox, QComboBox,
-    QDoubleSpinBox, QSizePolicy, QApplication,
+    QDoubleSpinBox, QSizePolicy, QApplication, QPushButton,
 )
 
 from app.models.media_item import MediaItem, TRANSITION_TYPES
 
 # ─── Constants ──────────────────────────────────────────────────────────────
 CLIP_W    = 162
-CLIP_H    = 112
-TRANS_W   = 38
+CLIP_H    = 124
+TRANS_W   = 32
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -104,6 +104,7 @@ class ClipBlock(QFrame):
     """Một clip trong timeline."""
     clicked = pyqtSignal(str)  # item.id
     removed = pyqtSignal(str)  # item.id
+    settings_changed = pyqtSignal()
 
     _TYPE_COLOR = {
         "slide": ("#7c3aed", "#2e1065", "#c4b5fd"),
@@ -113,8 +114,11 @@ class ClipBlock(QFrame):
 
     def __init__(self, item: MediaItem, parent=None):
         super().__init__(parent)
+        self.setObjectName("clipBlock")
         self.item = item
         self._selected = False
+        self._is_first = False
+        self._is_last = False
         self._build()
 
     # ── Build ─────────────────────────────────────────────────────────────
@@ -153,14 +157,87 @@ class ClipBlock(QFrame):
         self._remove_btn.setFixedSize(16, 16)
         self._remove_btn.setCursor(Qt.CursorShape.ArrowCursor)
         self._remove_btn.setStyleSheet(
-            "QToolButton{color:#7d8590;background:transparent;border:none;"
-            "font-size:14px;font-weight:700;}"
-            "QToolButton:hover{color:#f85149;}"
+            "QToolButton {"
+            "  color: #8b949e;"
+            "  background: #21262d;"
+            "  border: 1px solid #30363d;"
+            "  border-radius: 8px;"
+            "  font-size: 10px;"
+            "  font-weight: bold;"
+            "}"
+            "QToolButton:hover {"
+            "  color: #ffffff;"
+            "  background: #f85149;"
+            "  border-color: #f85149;"
+            "}"
         )
         self._remove_btn.clicked.connect(lambda: self.removed.emit(self.item.id))
 
+        # Intro / Ending buttons
+        self._intro_btn = QPushButton("Intro")
+        self._intro_btn.setCheckable(True)
+        self._intro_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._intro_btn.setStyleSheet("""
+            QPushButton {
+                background: #21262d; 
+                color: #8b949e; 
+                border: 1px solid #30363d;
+                border-radius: 3px; 
+                font-size: 9px; 
+                font-weight: 700; 
+                padding: 1px 6px;
+            }
+            QPushButton:checked {
+                background: #7c3aed22; 
+                color: #a78bfa; 
+                border: 1px solid #7c3aedaa;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background: #30363d;
+            }
+            QPushButton:checked:hover {
+                background: #8b5cf633;
+                border-color: #c084fc;
+            }
+        """)
+        self._intro_btn.clicked.connect(self._on_intro_toggled)
+        self._intro_btn.setVisible(False)
+
+        self._ending_btn = QPushButton("Ending")
+        self._ending_btn.setCheckable(True)
+        self._ending_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ending_btn.setStyleSheet("""
+            QPushButton {
+                background: #21262d; 
+                color: #8b949e; 
+                border: 1px solid #30363d;
+                border-radius: 3px; 
+                font-size: 9px; 
+                font-weight: 700; 
+                padding: 1px 6px;
+            }
+            QPushButton:checked {
+                background: #7c3aed22; 
+                color: #a78bfa; 
+                border: 1px solid #7c3aedaa;
+            }
+            QPushButton:hover {
+                color: #ffffff;
+                background: #30363d;
+            }
+            QPushButton:checked:hover {
+                background: #8b5cf633;
+                border-color: #c084fc;
+            }
+        """)
+        self._ending_btn.clicked.connect(self._on_ending_toggled)
+        self._ending_btn.setVisible(False)
+
         top.addWidget(self._type_lbl)
         top.addWidget(self._dur_lbl)
+        top.addWidget(self._intro_btn)
+        top.addWidget(self._ending_btn)
         top.addStretch()
         top.addWidget(self._remove_btn)
         lay.addLayout(top)
@@ -169,7 +246,11 @@ class ClipBlock(QFrame):
         self._thumb = QLabel()
         self._thumb.setFixedSize(CLIP_W - 10, 64)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._thumb.setStyleSheet("background:#0d1117; border-radius:4px;")
+        self._thumb.setStyleSheet(
+            "background: #0d1117; "
+            "border: 1px solid #21262d; "
+            "border-radius: 4px;"
+        )
         self._load_thumbnail()
         lay.addWidget(self._thumb)
 
@@ -177,9 +258,10 @@ class ClipBlock(QFrame):
         self._name_lbl = QLabel(self.item.display_name)
         self._name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._name_lbl.setStyleSheet(
-            "color:#c9d1d9; font-size:9px; background:transparent;"
+            "color: #e6edf3; font-size: 9px; font-weight: 500; background: transparent;"
         )
         self._name_lbl.setFixedWidth(CLIP_W - 10)
+        self._name_lbl.setToolTip(self.item.display_name)
         lay.addWidget(self._name_lbl)
 
     def _load_thumbnail(self):
@@ -191,11 +273,19 @@ class ClipBlock(QFrame):
                            Qt.AspectRatioMode.KeepAspectRatio,
                            Qt.TransformationMode.SmoothTransformation)
             )
+            self._thumb.setStyleSheet(
+                "background: #0d1117; "
+                "border: 1px solid #21262d; "
+                "border-radius: 4px;"
+            )
         else:
             icons = {"slide": "📊", "video": "🎬", "image": "🖼️"}
             self._thumb.setText(icons.get(self.item.media_type, "?"))
             self._thumb.setStyleSheet(
-                "background:#21262d; border-radius:4px; font-size:26px;"
+                "background: #21262d; "
+                "border: 1px solid #30363d; "
+                "border-radius: 4px; "
+                "font-size: 26px;"
             )
 
     def refresh_thumbnail(self):
@@ -209,7 +299,7 @@ class ClipBlock(QFrame):
             self.item.media_type, ("#7c3aed", "#2e1065", "#c4b5fd"))
         if self._selected:
             self.setStyleSheet(f"""
-                QFrame {{
+                QFrame#clipBlock {{
                     background:{bg};
                     border:2px solid {border};
                     border-radius:8px;
@@ -217,12 +307,12 @@ class ClipBlock(QFrame):
             """)
         else:
             self.setStyleSheet("""
-                QFrame {
+                QFrame#clipBlock {
                     background:#161b22;
                     border:1.5px solid #30363d;
                     border-radius:8px;
                 }
-                QFrame:hover {
+                QFrame#clipBlock:hover {
                     border:1.5px solid #484f58;
                     background:#1c2130;
                 }
@@ -256,6 +346,40 @@ class ClipBlock(QFrame):
         drag.setHotSpot(event.position().toPoint())
         drag.exec(Qt.DropAction.MoveAction)
 
+    def set_position_flags(self, is_first: bool, is_last: bool):
+        self._is_first = is_first
+        self._is_last = is_last
+        is_vid = self.item.media_type == "video"
+        
+        self._intro_btn.setVisible(is_first and is_vid)
+        self._ending_btn.setVisible(is_last and is_vid)
+
+    def update_flags(self):
+        is_opening = getattr(self.item, "is_opening", False)
+        is_ending = getattr(self.item, "is_ending", False)
+        self._intro_btn.setChecked(is_opening)
+        self._ending_btn.setChecked(is_ending)
+
+    def _on_intro_toggled(self, checked: bool):
+        self.item.is_opening = checked
+        if checked:
+            self.item.tts_volume = 0.0
+            self.item.assigned_pos = 0
+            self.item.assigned_text = ""
+        else:
+            self.item.tts_volume = 1.0
+        self.settings_changed.emit()
+
+    def _on_ending_toggled(self, checked: bool):
+        self.item.is_ending = checked
+        if checked:
+            self.item.tts_volume = 0.0
+            self.item.assigned_pos = 999999
+            self.item.assigned_text = ""
+        else:
+            self.item.tts_volume = 1.0
+        self.settings_changed.emit()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  TRANSITION NODE
@@ -274,62 +398,78 @@ class TransitionNode(QFrame):
     def _build(self):
         self.setFixedSize(TRANS_W, CLIP_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click để chọn transition")
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setToolTip(f"Chọn chuyển cảnh (Hiện tại: {self._display_name()})")
+
+        # Main layout of TransitionNode to center the pill and label
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.setSpacing(4)
+        main_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Pill đại diện cho nút chuyển cảnh
+        self._pill = QFrame()
+        self._pill.setObjectName("transPill")
+        self._pill.setFixedSize(24, 24)
+
+        pill_lay = QVBoxLayout(self._pill)
+        pill_lay.setContentsMargins(0, 0, 0, 0)
+        pill_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._icon = QLabel()
+        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pill_lay.addWidget(self._icon)
+
+        # Label hiển thị tên hiệu ứng bên dưới pill
+        self._lbl = QLabel()
+        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl.setStyleSheet("color:#8b949e; font-size:9px; font-weight:500; background:transparent;")
+
+        main_lay.addWidget(self._pill)
+        main_lay.addWidget(self._lbl)
         self._apply_style()
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setSpacing(2)
-
-        self._icon = QLabel("✦" if self._type != "none" else "╌")
-        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon.setStyleSheet("background:transparent; font-size:13px;")
-        lay.addWidget(self._icon)
-
-        self._lbl = QLabel(self._short_name())
-        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl.setStyleSheet(
-            "background:transparent; font-size:7px; color:#8b949e;"
-        )
-        lay.addWidget(self._lbl)
-
-    def _short_name(self) -> str:
+    def _display_name(self) -> str:
         for display, key in TRANSITION_TYPES:
             if key == self._type:
-                return display[:5]
+                return display
         return "Không"
 
     def _apply_style(self):
+        self._lbl.setText(self._display_name())
         if self._type != "none":
-            self.setStyleSheet("""
-                QFrame {
-                    background:#1e0f4a;
-                    border:1.5px dashed #7c3aed;
-                    border-radius:6px;
+            self._icon.setText("✦")
+            self._icon.setStyleSheet("background:transparent; font-size:11px; font-weight:bold; color:#ffffff;")
+            self._pill.setStyleSheet("""
+                QFrame#transPill {
+                    background-color: #7c3aed;
+                    border: 1px solid #a78bfa;
+                    border-radius: 12px;
                 }
-                QFrame:hover {
-                    background:#2e1065;
-                    border-color:#a78bfa;
+                QFrame#transPill:hover {
+                    background-color: #8b5cf6;
+                    border-color: #c084fc;
                 }
             """)
         else:
-            self.setStyleSheet("""
-                QFrame {
-                    background:transparent;
-                    border:1.5px dashed #30363d;
-                    border-radius:6px;
+            self._icon.setText("╌")
+            self._icon.setStyleSheet("background:transparent; font-size:11px; font-weight:bold; color:#8b949e;")
+            self._pill.setStyleSheet("""
+                QFrame#transPill {
+                    background-color: #21262d;
+                    border: 1px dashed #30363d;
+                    border-radius: 12px;
                 }
-                QFrame:hover {
-                    background:#161b22;
-                    border-color:#484f58;
+                QFrame#transPill:hover {
+                    background-color: #30363d;
+                    border-color: #484f58;
+                    border-style: solid;
                 }
             """)
 
     def update_type(self, trans_type: str):
         self._type = trans_type
-        self._icon.setText("✦" if self._type != "none" else "╌")
-        self._lbl.setText(self._short_name())
+        self.setToolTip(f"Chọn chuyển cảnh (Hiện tại: {self._display_name()})")
         self._apply_style()
 
     def mousePressEvent(self, event):
@@ -346,10 +486,11 @@ class TimelineWidget(QWidget):
     Timeline ngang kiểu Clipchamp.
     Hiển thị MediaItem theo hàng ngang, giữa mỗi clip có TransitionNode.
     """
-    clip_selected      = pyqtSignal(str)        # item.id
-    clip_removed       = pyqtSignal(str)        # item.id
-    transition_changed = pyqtSignal(int, str, float)  # index, type, dur
-    reordered          = pyqtSignal()
+    clip_selected        = pyqtSignal(str)        # item.id
+    clip_removed         = pyqtSignal(str)        # item.id
+    transition_changed   = pyqtSignal(int, str, float)  # index, type, dur
+    reordered            = pyqtSignal()
+    clip_settings_changed = pyqtSignal()
  
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -401,6 +542,8 @@ class TimelineWidget(QWidget):
             QScrollBar::add-line:horizontal,
             QScrollBar::sub-line:horizontal { width:0; }
         """)
+        self._scroll.installEventFilter(self)
+        self._scroll.viewport().installEventFilter(self)
 
 
         self._inner = QWidget()
@@ -482,6 +625,14 @@ class TimelineWidget(QWidget):
             block = ClipBlock(item)
             block.clicked.connect(self._on_clip_clicked)
             block.removed.connect(self._on_clip_removed)
+            block.settings_changed.connect(self.clip_settings_changed.emit)
+
+            # Đặt cờ vị trí cho các khối để hiển thị nút Intro/Ending
+            is_first = (i == 0)
+            is_last = (i == len(self._items) - 1)
+            block.set_position_flags(is_first, is_last)
+            block.update_flags()
+
             self._clip_widgets[item.id] = block
 
             if item.id == self._selected_id:
@@ -492,6 +643,16 @@ class TimelineWidget(QWidget):
 
         self._inner_lay.addStretch()
         self._inner.setMinimumWidth(max(420, total_w))
+
+    def update_all_clips(self):
+        """Cập nhật cờ và trạng thái của tất cả các clip block trong timeline."""
+        for i, item in enumerate(self._items):
+            block = self._clip_widgets.get(item.id)
+            if block:
+                is_first = (i == 0)
+                is_last = (i == len(self._items) - 1)
+                block.set_position_flags(is_first, is_last)
+                block.update_flags()
 
     def _on_clip_clicked(self, item_id: str):
         if self._selected_id and self._selected_id in self._clip_widgets:
@@ -567,3 +728,13 @@ class TimelineWidget(QWidget):
                     self._rebuild()
                     self.reordered.emit()
             event.acceptProposedAction()
+
+    def eventFilter(self, obj, event) -> bool:
+        from PyQt6.QtCore import QEvent
+        if (obj == self._scroll or obj == self._scroll.viewport()) and event.type() == QEvent.Type.Wheel:
+            hbar = self._scroll.horizontalScrollBar()
+            if hbar and hbar.isVisible():
+                delta = event.angleDelta().y()
+                hbar.setValue(hbar.value() - delta)
+                return True
+        return super().eventFilter(obj, event)

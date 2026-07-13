@@ -69,6 +69,7 @@ class SlideScriptEditor(QPlainTextEdit):
                 tag_width  = rect_end.left() - rect_start.left()
                 tag_height = rect_start.height()
                 if tag_width > 0:
+                    # Đưa lại padding -4px và +8px vì đã có dấu cách xung quanh thẻ slide ngăn ngừa đè chữ
                     rect = QRect(
                         rect_start.left() - 4,
                         rect_start.top()  + 1,
@@ -224,9 +225,16 @@ class MediaDropZone(QFrame):
         ]
         for label, filt, mtype in buttons:
             btn = QPushButton(label)
-            btn.setFixedHeight(22)
+            btn.setFixedHeight(24)
             btn.setStyleSheet(
-                "QPushButton{font-size:10px;padding:1px 6px;}"
+                "QPushButton {"
+                "  font-size: 11px;"
+                "  font-weight: 600;"
+                "  padding: 2px 8px;"
+                "  min-height: 24px;"
+                "  max-height: 24px;"
+                "  border-radius: 4px;"
+                "}"
             )
             btn.clicked.connect(
                 lambda _, f=filt, m=mtype: self._open_dialog(f, m)
@@ -311,9 +319,17 @@ class AudioMixPanel(QFrame):
         self._last_tts_vol = 100
         self._last_vid_vol = 30
         
+        self.setObjectName("audioMixPanel")
         self.setStyleSheet("""
-            QFrame { background:#12161c; border:1px solid #21262d; border-radius:6px; }
-            QLabel { background:transparent; color:#8b949e; font-size:10px; }
+            #audioMixPanel { background:#12161c; border:1px solid #21262d; border-radius:6px; }
+            QLabel { background:transparent; border:none; color:#8b949e; font-size:10px; }
+            QToolTip {
+                color: #ffffff; 
+                background-color: #21262d; 
+                border: 1px solid #30363d;
+                font-size: 10px;
+                padding: 4px;
+            }
             QToolButton {
                 background: transparent;
                 border: none;
@@ -390,15 +406,15 @@ class AudioMixPanel(QFrame):
         self._mute_all_btn.setToolTip("Tắt tiếng tất cả các clip video trong timeline")
         self._mute_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mute_all_btn.clicked.connect(lambda: self.apply_video_vol_all.emit(0.0))
-        self._mute_all_btn.setStyleSheet(
-            "QToolButton{"
-            "  color:#f85149; background:transparent; border:none;"
-            "  font-size:10px; font-weight:bold; padding:2px 6px;"
-            "}"
-            "QToolButton:hover{"
-            "  color:#ff7b72; background:#2c1515; border-radius:4px;"
-            "}"
-        )
+        self._mute_all_btn.setStyleSheet("""
+            QToolButton {
+                color: #f85149; background: transparent; border: none;
+                font-size: 10px; font-weight: bold; padding: 2px 6px;
+            }
+            QToolButton:hover {
+                color: #ffffff; background: #da3633; border-radius: 4px;
+            }
+        """)
         lay.addWidget(self._mute_all_btn)
 
         # Set 30% button
@@ -407,15 +423,15 @@ class AudioMixPanel(QFrame):
         self._vol30_all_btn.setToolTip("Đặt âm lượng video là 30% cho tất cả các clip")
         self._vol30_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._vol30_all_btn.clicked.connect(lambda: self.apply_video_vol_all.emit(0.3))
-        self._vol30_all_btn.setStyleSheet(
-            "QToolButton{"
-            "  color:#58a6ff; background:transparent; border:none;"
-            "  font-size:10px; font-weight:bold; padding:2px 6px;"
-            "}"
-            "QToolButton:hover{"
-            "  color:#79c0ff; background:#15233c; border-radius:4px;"
-            "}"
-        )
+        self._vol30_all_btn.setStyleSheet("""
+            QToolButton {
+                color: #58a6ff; background: transparent; border: none;
+                font-size: 10px; font-weight: bold; padding: 2px 6px;
+            }
+            QToolButton:hover {
+                color: #ffffff; background: #1f6feb; border-radius: 4px;
+            }
+        """)
         lay.addWidget(self._vol30_all_btn)
 
         lay.addStretch()
@@ -425,12 +441,21 @@ class AudioMixPanel(QFrame):
         if item and item.media_type == "video":
             self._tts_slider.blockSignals(True)
             self._vid_slider.blockSignals(True)
+
+            is_opening = getattr(item, "is_opening", False) or getattr(item, "is_ending", False)
+
             self._tts_slider.setValue(int(item.tts_volume  * 100))
             self._vid_slider.setValue(int(item.video_volume * 100))
             self._tts_lbl.setText(f"{int(item.tts_volume*100)}%")
             self._vid_lbl.setText(f"{int(item.video_volume*100)}%")
+            
+            # Khóa tts slider nếu đang bật chế độ opening/ending
+            self._tts_slider.setEnabled(not is_opening)
+            self._tts_mute_btn.setEnabled(not is_opening)
+
             self._tts_slider.blockSignals(False)
             self._vid_slider.blockSignals(False)
+            
             self._update_mute_states()
             self.setVisible(True)
         else:
@@ -614,6 +639,7 @@ class SlideSyncTab(QWidget):
         self._load_thread:   Optional[SlideLoadThread]   = None
         self._import_thread: Optional[MediaImportThread] = None
         self._import_queue:  List[tuple[str, str]]        = []  # [(path, media_type)]
+        self._is_importing:  bool                         = False
 
         self._sub_settings = {
             "enabled":   True,
@@ -753,16 +779,58 @@ class SlideSyncTab(QWidget):
         # Assign buttons
         assign_row = QHBoxLayout()
         self._assign_btn = QPushButton("⬅  Gán Slide đang chọn")
-        self._assign_btn.setObjectName("primary")
-        self._assign_btn.setMinimumHeight(38)
+        self._assign_btn.setFixedHeight(38)
+        self._assign_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6d28d9;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 13px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #7c3aed;
+            }
+            QPushButton:pressed {
+                background-color: #5b21b6;
+            }
+            QPushButton:disabled {
+                background-color: #21262d;
+                color: #484f58;
+                border: 1px solid #30363d;
+            }
+        """)
         self._assign_btn.setEnabled(False)
         self._assign_btn.clicked.connect(self._assign_slide)
 
         self._auto_btn = QPushButton("⚡  Tự động gán tất cả")
-        self._auto_btn.setObjectName("success")
-        self._auto_btn.setMinimumHeight(38)
+        self._auto_btn.setFixedHeight(38)
+        self._auto_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a7f37;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 13px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #238636;
+            }
+            QPushButton:pressed {
+                background-color: #116329;
+            }
+            QPushButton:disabled {
+                background-color: #21262d;
+                color: #484f58;
+                border: 1px solid #30363d;
+            }
+        """)
         self._auto_btn.setEnabled(False)
-        self._auto_btn.clicked.connect(self._auto_assign_slides)
+        self._auto_btn.clicked.connect(lambda: self._auto_assign_slides(prompt=True))
 
         assign_row.addWidget(self._assign_btn, 1)
         assign_row.addWidget(self._auto_btn, 1)
@@ -779,7 +847,7 @@ class SlideSyncTab(QWidget):
         self._sub_frame.setStyleSheet("""
             QFrame{background:#161b22;border:1px solid #30363d;border-radius:8px;}
             QLabel{color:#8b949e;font-size:11px;font-weight:600;border:none;}
-            QComboBox,QCheckBox{
+            QComboBox,QCheckBox,QSpinBox{
                 background:#0d1117;border:1px solid #30363d;
                 border-radius:4px;padding:3px 6px;color:#e6edf3;font-size:12px;
             }
@@ -855,7 +923,7 @@ class SlideSyncTab(QWidget):
         self._sub_pos_spin.setMinimum(1)
         self._sub_pos_spin.setMaximum(60)
         self._sub_pos_spin.setValue(self._sub_settings.get("position",1))
-        self._sub_pos_spin.setFixedWidth(48)
+        self._sub_pos_spin.setFixedWidth(60)
         self._sub_pos_slider.valueChanged.connect(self._sub_pos_spin.setValue)
         self._sub_pos_spin.valueChanged.connect(self._sub_pos_slider.setValue)
         self._sub_pos_slider.valueChanged.connect(self._on_sub_settings_changed)
@@ -887,13 +955,44 @@ class SlideSyncTab(QWidget):
 
         clear_btn = QPushButton("🗑  Xóa tất cả")
         clear_btn.setObjectName("danger")
-        clear_btn.setFixedHeight(22)
-        clear_btn.setStyleSheet("QPushButton{font-size:10px; padding:2px 8px; font-weight:bold;}")
+        clear_btn.setFixedHeight(24)
+        clear_btn.setStyleSheet("""
+            QPushButton#danger {
+                background-color: #b91c1c;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 2px 8px;
+                min-height: 24px;
+                max-height: 24px;
+            }
+            QPushButton#danger:hover {
+                background-color: #dc2626;
+            }
+        """)
         clear_btn.clicked.connect(self._clear_all)
 
         auto_trans_btn = QPushButton("✦  Tự động chuyển cảnh")
-        auto_trans_btn.setFixedHeight(22)
-        auto_trans_btn.setStyleSheet("QPushButton{font-size:10px; padding:2px 8px; font-weight:bold; background:#1e0f4a; border:1px solid #7c3aed; color:#c4b5fd;}")
+        auto_trans_btn.setFixedHeight(24)
+        auto_trans_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                font-weight: bold;
+                padding: 2px 8px;
+                min-height: 24px;
+                max-height: 24px;
+                border-radius: 4px;
+                background: #1e0f4a;
+                border: 1px solid #7c3aed;
+                color: #c4b5fd;
+            }
+            QPushButton:hover {
+                background: #2d166f;
+                border-color: #9061f9;
+            }
+        """)
         auto_trans_btn.clicked.connect(self._auto_assign_transitions)
 
         hdr.addWidget(auto_trans_btn)
@@ -949,6 +1048,7 @@ class SlideSyncTab(QWidget):
         self._audio_mix = AudioMixPanel()
         self._audio_mix.setVisible(False)
         self._audio_mix.apply_video_vol_all.connect(self._on_apply_video_vol_all)
+        self._audio_mix.changed.connect(self._on_audio_mix_changed)
         lay.addWidget(self._audio_mix)   # stretch=0, fixed 56px khi hiện
 
         self._timeline = TimelineWidget()
@@ -956,6 +1056,7 @@ class SlideSyncTab(QWidget):
         self._timeline.clip_removed.connect(self._on_clip_removed)
         self._timeline.transition_changed.connect(self._on_transition_changed)
         self._timeline.reordered.connect(self._on_timeline_reordered)
+        self._timeline.clip_settings_changed.connect(self._on_clip_settings_changed)
         lay.addWidget(self._timeline)   # stretch=0 → fixed height từ bên trong
 
         # Slide count info & Clear button in a single row
@@ -980,15 +1081,58 @@ class SlideSyncTab(QWidget):
 
     def _build_action_bar(self) -> QFrame:
         bar = QFrame()
+        bar.setObjectName("actionBar")
         bar.setFixedHeight(56)
-        bar.setStyleSheet(
-            "QFrame{background:#161b22;border-top:1px solid #21262d;}"
-        )
+        bar.setStyleSheet("""
+            QFrame#actionBar {
+                background-color: #161b22;
+                border-top: 1px solid #21262d;
+            }
+            QPushButton {
+                background-color: #21262d;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 0 16px;
+                font-weight: 600;
+                font-size: 13px;
+                min-height: 36px;
+                max-height: 36px;
+            }
+            QPushButton:hover {
+                background-color: #30363d;
+                border-color: #8b949e;
+                color: #e6edf3;
+            }
+            QPushButton:pressed {
+                background-color: #0d1117;
+                border-color: #30363d;
+            }
+            QPushButton#success {
+                background-color: #1f883d;
+                color: #ffffff;
+                border: 1px solid #238636;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 13px;
+                min-height: 36px;
+                max-height: 36px;
+                padding: 0 20px;
+            }
+            QPushButton#success:hover {
+                background-color: #2ea043;
+                border-color: #3fb950;
+            }
+            QPushButton#success:pressed {
+                background-color: #1a7f37;
+                border-color: #238636;
+            }
+        """)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setContentsMargins(16, 10, 16, 10)
         lay.setSpacing(10)
 
-        back_btn = QPushButton("← Quay lại tạo MP3")
+        back_btn = QPushButton("←  Quay lại tạo MP3")
         back_btn.clicked.connect(self.request_back.emit)
 
         save_btn = QPushButton("💾  Lưu dự án")
@@ -996,16 +1140,16 @@ class SlideSyncTab(QWidget):
 
         self._action_stats = QLabel("")
         self._action_stats.setStyleSheet(
-            "color:#7d8590; font-size:12px; background:transparent;"
+            "color: #8b949e; font-size: 12px; font-weight: 500; background: transparent;"
         )
         self._action_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         preview_btn = QPushButton("▶  Xem trước Video")
         preview_btn.clicked.connect(self._preview_video)
 
-        self._next_btn = QPushButton("Tiếp tục → Xuất Video")
+        self._next_btn = QPushButton("Tiếp tục  →  Xuất Video")
         self._next_btn.setObjectName("success")
-        self._next_btn.setMinimumHeight(38)
+        self._next_btn.setMinimumHeight(36)
         self._next_btn.setMinimumWidth(180)
         self._next_btn.clicked.connect(self._go_export)
 
@@ -1023,6 +1167,7 @@ class SlideSyncTab(QWidget):
     # ──────────────────────────────────────────────────────────────────────
 
     def _on_file_dropped(self, path: str, media_type: str):
+        self._is_importing = True
         self._import_queue.append((path, media_type))
         self._process_import_queue()
 
@@ -1034,6 +1179,12 @@ class SlideSyncTab(QWidget):
             return
 
         if not self._import_queue:
+            if getattr(self, "_is_importing", False):
+                self._is_importing = False
+                slides = self._slide_items
+                assigned = sum(1 for s in slides if s.is_assigned)
+                if assigned == 0 and slides and self._editor.toPlainText().strip():
+                    self._auto_assign_slides(prompt=False)
             return
 
         path, media_type = self._import_queue.pop(0)
@@ -1202,6 +1353,21 @@ class SlideSyncTab(QWidget):
         self._refresh_editor_from_slides()
         self._update_stats()
 
+    def _on_clip_settings_changed(self):
+        # 1. Cập nhật giao diện AudioMixPanel nếu clip đang chọn thay đổi thiết lập
+        if self._selected_id:
+            item = self._find_item(self._selected_id)
+            if item:
+                self._audio_mix.set_item(item)
+        # 2. Tự động gán lại slides mà không hiện thông báo hỏi
+        self._auto_assign_slides(prompt=False)
+
+    def _on_audio_mix_changed(self):
+        # 1. Cập nhật cờ hiển thị của tất cả clip blocks trên timeline
+        self._timeline.update_all_clips()
+        # 2. Tự động gán lại slides mà không hiện thông báo hỏi
+        self._auto_assign_slides(prompt=False)
+
     def _auto_assign_transitions(self):
         if len(self._media_items) < 2:
             QMessageBox.information(self, "Thông báo", "Cần ít nhất 2 clip để gán chuyển cảnh.")
@@ -1264,28 +1430,46 @@ class SlideSyncTab(QWidget):
 
         clean_parts    = []
         last_idx       = 0
-        total_tag_len  = 0
         assignments    = {}
 
+        clean_text = ""
         for match in matches:
-            clean_parts.append(editor_text[last_idx:match.start()])
-            clean_pos  = match.start() - total_tag_len
+            part = editor_text[last_idx:match.start()]
+            clean_text += part
             slide_num  = int(match.group(1))
             slide_idx  = slide_num - 1
-            assignments[slide_idx] = clean_pos
+            assignments[slide_idx] = len(clean_text)
             last_idx       = match.end()
-            total_tag_len += match.end() - match.start()
 
-        clean_parts.append(editor_text[last_idx:])
-        clean_text = "".join(clean_parts)
+        clean_text += editor_text[last_idx:]
+
+        # Lọc sạch khoảng trắng thừa và dịch chuyển index gán cho tương ứng
+        final_clean_text = ""
+        final_assignments = {}
+
+        for idx, char in enumerate(clean_text):
+            # Check gán
+            for slide_idx, pos in assignments.items():
+                if pos == idx:
+                    final_assignments[slide_idx] = len(final_clean_text)
+
+            # Collapse dấu cách trùng lặp
+            if char == " " and final_clean_text and final_clean_text[-1] == " ":
+                continue
+            final_clean_text += char
+
+        # Check gán ở cuối cùng
+        for slide_idx, pos in assignments.items():
+            if pos == len(clean_text):
+                final_assignments[slide_idx] = len(final_clean_text)
 
         final = {}
-        for idx, clean_pos in assignments.items():
-            snip_end = min(len(clean_text), clean_pos + 45)
-            snippet  = clean_text[max(0, clean_pos):snip_end].replace("\n"," ").strip()
+        for idx, clean_pos in final_assignments.items():
+            snip_end = min(len(final_clean_text), clean_pos + 45)
+            snippet  = final_clean_text[max(0, clean_pos):snip_end].replace("\n"," ").strip()
             final[idx] = (clean_pos, snippet)
 
-        return clean_text, final
+        return final_clean_text, final
 
     def _on_text_changed(self):
         raw_text = self._editor.toPlainText()
@@ -1313,7 +1497,12 @@ class SlideSyncTab(QWidget):
         chars = list(self._script_text)
         for item in slide_items:
             pos = min(len(chars), max(0, item.assigned_pos))
-            tag = f"[Slide {item.display_number}]"
+            
+            # Đảm bảo có đúng 1 dấu cách trước và sau thẻ Slide để hiển thị đẹp mắt trong editor
+            space_before = " " if pos > 0 and not chars[pos - 1].isspace() else ""
+            space_after  = " " if pos < len(chars) and not chars[pos].isspace() else ""
+            
+            tag = f"{space_before}[Slide {item.display_number}]{space_after}"
             chars.insert(pos, tag)
 
         new_text = "".join(chars)
@@ -1385,29 +1574,111 @@ class SlideSyncTab(QWidget):
             self._assign_btn.setEnabled(True),
         ))
 
-    def _auto_assign_slides(self):
+    def _auto_assign_slides(self, prompt: bool = True):
         slide_items = self._slide_items
         if not slide_items:
             return
 
-        reply = QMessageBox.question(
-            self, "⚡ Tự động gán Slide",
-            "Hệ thống sẽ tự động phân bổ tất cả slide vào kịch bản.\n"
-            "Các gán cũ sẽ bị ghi đè.\n\nTiếp tục?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        # Lọc bỏ các video được đánh dấu là intro/opening hoặc ending
+        assignable_items = [
+            item for item in slide_items
+            if not getattr(item, "is_opening", False) and not getattr(item, "is_ending", False)
+        ]
+        if not assignable_items:
             return
 
+        if prompt:
+            reply = QMessageBox.question(
+                self, "⚡ Tự động gán Slide",
+                "Hệ thống sẽ tự động phân bổ tất cả slide vào kịch bản.\n"
+                "Các gán cũ sẽ bị ghi đè.\n\nTiếp tục?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         text     = self._script_text
-        n        = len(slide_items)
+        n        = len(assignable_items)
         text_len = len(text)
 
         if n == 1:
-            slide_items[0].assigned_pos = 0
+            assignable_items[0].assigned_pos = 0
             self._refresh_editor_from_slides()
             return
 
+        # Đọc dữ liệu JSON timestamps nếu có
+        import json
+        json_data = None
+        audio_duration_sec = 0.0
+        if self._json_path and os.path.exists(self._json_path):
+            try:
+                with open(self._json_path, "r", encoding="utf-8") as f:
+                    json_data = json.load(f)
+                    total_ms = json_data.get("total_duration_ms", 0)
+                    if not total_ms:
+                        sents = json_data.get("sentences", [])
+                        if sents:
+                            total_ms = sents[-1].get("end_ms", 0)
+                    audio_duration_sec = total_ms / 1000.0
+            except Exception:
+                json_data = None
+
+        # Tính offset của TTS (độ trôi của giọng đọc do video opening đứng đầu)
+        tts_start_sec = 0.0
+        cumulative_time = 0.0
+        for item in slide_items:
+            if not getattr(item, "is_opening", False):
+                tts_start_sec = cumulative_time
+                break
+            cumulative_time += item.duration_sec
+
+        # Kiểm tra nếu tổng thời lượng video vượt quá thời lượng audio
+        if json_data and audio_duration_sec > 0:
+            total_video_duration = sum(item.duration_sec for item in slide_items)
+            max_allowed_duration = tts_start_sec + audio_duration_sec
+            if total_video_duration > max_allowed_duration:
+                QMessageBox.warning(
+                    self, "Cảnh báo thời lượng",
+                    f"Tổng thời lượng các clip đã import ({total_video_duration:.1f}s) "
+                    f"lớn hơn tổng thời lượng của kịch bản/audio sau khi cộng delay opening ({max_allowed_duration:.1f}s).\n\n"
+                    "Một số video ở cuối sẽ không hiển thị hết hoặc bị bỏ qua."
+                )
+
+        for item in slide_items:
+            if getattr(item, "is_opening", False):
+                item.assigned_pos = 0
+            elif getattr(item, "is_ending", False):
+                item.assigned_pos = 999999
+            else:
+                item.assigned_pos = -1
+            item.assigned_text = ""
+
+        # Nếu có dữ liệu JSON, gán theo thời gian thực tế của các clip
+        if json_data and audio_duration_sec > 0:
+            from app.core.video_exporter import build_char_to_ms_map
+            mapping = build_char_to_ms_map(text, json_data)
+            
+            if mapping:
+                for i, item in enumerate(assignable_items):
+                    # Tính thời điểm bắt đầu của clip này trong phần giọng đọc (không tính intro)
+                    start_time_sec = sum(s.duration_sec for s in assignable_items[:i])
+                    
+                    if start_time_sec >= audio_duration_sec:
+                        item.assigned_pos = len(text)
+                    else:
+                        target_ms = start_time_sec * 1000.0
+                        best_pos = 0
+                        min_diff = float("inf")
+                        for char_start, start_ms, end_ms in mapping:
+                            diff = abs(start_ms - target_ms)
+                            if diff < min_diff:
+                                min_diff = diff
+                                best_pos = char_start
+                        item.assigned_pos = best_pos
+                self._refresh_editor_from_slides()
+                return
+
+        # Fallback nếu không có JSON hoặc không mapping được: phân bổ đều theo số câu/ký tự
         last_dot = text.rfind(".")
         if last_dot == -1:
             last_dot = text_len
@@ -1426,23 +1697,17 @@ class SlideSyncTab(QWidget):
 
         valid_starts = [p for p in sentence_starts if p < last_dot]
 
-        for item in slide_items:
-            item.assigned_pos  = -1
-            item.assigned_text = ""
-
-        slide_items[0].assigned_pos = 0
-        for i in range(1, n - 1):
-            if len(valid_starts) >= n - 1:
-                sent_idx = int(i * len(valid_starts) / (n - 1))
+        for i, item in enumerate(assignable_items):
+            if len(valid_starts) >= n:
+                sent_idx = int(i * len(valid_starts) / n)
                 pos = valid_starts[sent_idx]
             else:
-                pos = int(i * last_dot / (n - 1))
+                pos = int(i * last_dot / n)
                 while pos > 0 and not text[pos - 1].isspace():
                     pos -= 1
                 pos = min(pos, last_dot)
-            slide_items[i].assigned_pos = pos
+            item.assigned_pos = pos
 
-        slide_items[-1].assigned_pos = last_dot
         self._refresh_editor_from_slides()
 
     # ──────────────────────────────────────────────────────────────────────
@@ -1507,12 +1772,12 @@ class SlideSyncTab(QWidget):
 
         if unassigned > 0:
             self._action_stats.setText(
-                f"✅ {assigned} đã gán  •  ⚠️ {unassigned} slide chưa gán"
+                f"✅  {assigned} đã gán   ·   ⚠️  {unassigned} slide chưa gán"
             )
         else:
             self._action_stats.setText(
-                f"✅ Tất cả {len(slides)} slide đã gán" if slides
-                else f"🎬 {total} media trong timeline"
+                f"✅  Tất cả {len(slides)} slide đã gán" if slides
+                else f"🎬  {total} media trong timeline"
             )
 
         self._auto_btn.setEnabled(

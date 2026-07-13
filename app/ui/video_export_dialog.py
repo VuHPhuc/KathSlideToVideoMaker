@@ -202,6 +202,7 @@ class ExportVideoDialog(QDialog):
         """)
         self._build_ui()
         self._auto_fill_output()
+        self._load_settings()
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
@@ -252,7 +253,13 @@ class ExportVideoDialog(QDialog):
         # Resolution
         lay.addWidget(self._lbl("Độ phân giải:"))
         self._res_combo = QComboBox()
-        for label in ["1920 × 1080  (Full HD)", "1280 × 720  (HD)", "854 × 480  (SD)"]:
+        for label in [
+            "3840 × 2160  (4K)",
+            "2560 × 1440  (2K)",
+            "1920 × 1080  (Full HD)",
+            "1280 × 720  (HD)",
+            "854 × 480  (SD)"
+        ]:
             self._res_combo.addItem(label)
         lay.addWidget(self._res_combo)
 
@@ -308,7 +315,7 @@ class ExportVideoDialog(QDialog):
 
     def _resolution(self) -> tuple[int, int]:
         idx = self._res_combo.currentIndex()
-        return [(1920, 1080), (1280, 720), (854, 480)][idx]
+        return [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (854, 480)][idx]
 
     def _start_export(self):
         output = self._out_edit.text().strip()
@@ -318,6 +325,11 @@ class ExportVideoDialog(QDialog):
 
         # Nếu không có JSON → dùng fallback estimation
         json_path = self.json_path if (self.json_path and Path(self.json_path).exists()) else ""
+
+        # Lưu lựa chọn độ phân giải
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("last_resolution", self._res_combo.currentText())
 
         self._export_btn.setEnabled(False)
         self._progress.setVisible(True)
@@ -336,6 +348,14 @@ class ExportVideoDialog(QDialog):
         self._thread.progress.connect(self._on_progress)
         self._thread.finished.connect(self._on_finished)
         self._thread.start()
+
+    def _load_settings(self):
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        last_res = settings.value("last_resolution", "1920 × 1080  (Full HD)")
+        idx = self._res_combo.findText(last_res)
+        if idx >= 0:
+            self._res_combo.setCurrentIndex(idx)
 
     def _on_progress(self, pct: int, msg: str):
         self._progress.setValue(pct)

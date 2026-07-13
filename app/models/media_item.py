@@ -36,11 +36,12 @@ class MediaItem:
         self.transition_in: str = "none"
         self.transition_dur: float = 0.5
         
-        self.video_volume: float = 1.0
+        self.video_volume: float = 0.3 if media_type == "video" else 1.0
         self.tts_volume: float = 1.0
         
         self.assigned_pos: int = -1
         self.assigned_text: str = ""
+        self.is_opening: bool = False
         self._display_number: int = 1
 
     @property
@@ -53,7 +54,7 @@ class MediaItem:
 
     @property
     def is_assigned(self) -> bool:
-        return self.assigned_pos >= 0
+        return self.assigned_pos >= 0 or getattr(self, "is_opening", False) or getattr(self, "is_ending", False)
 
     @property
     def display_name(self) -> str:

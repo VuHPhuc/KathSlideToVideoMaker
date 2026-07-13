@@ -828,7 +828,7 @@ def export_video_with_media(
                 # Tính offset TTS: tổng duration của các items đầu timeline trước khi TTS bắt đầu
                 tts_offset_sec = 0.0
                 for m_item in media_items:
-                    if m_item.is_assigned:
+                    if m_item.is_assigned and not getattr(m_item, "is_opening", False):
                         break
                     tts_offset_sec += m_item.duration_sec
 
@@ -1048,7 +1048,7 @@ def _mix_audio(merged_video: str, mp3_path: str, media_items,
     # Tính offset của TTS audio trong final video
     tts_start_sec = 0.0
     for i, m in enumerate(media_items):
-        if m.is_assigned:
+        if m.is_assigned and not getattr(m, "is_opening", False):
             tts_start_sec = clip_start_times[i]
             break
 

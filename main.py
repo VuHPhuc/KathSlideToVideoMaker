@@ -36,6 +36,11 @@ def main():
     font = QFont("Segoe UI", 10)
     app.setFont(font)
 
+    # Set application window icon
+    icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "app", "resources", "icon.png"))
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

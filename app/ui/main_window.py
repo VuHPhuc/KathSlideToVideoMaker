@@ -16,7 +16,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QDragEnterEvent, QDropEvent, QFont,
-    QLinearGradient, QPainter, QPalette,
+    QLinearGradient, QPainter, QPalette, QPixmap, QPainterPath,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog,
@@ -520,7 +520,37 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(hdr)
         lay.setContentsMargins(20, 0, 20, 0)
 
-        title = QLabel("🎬  KathFlow Studio")
+        import os
+        logo_lbl = QLabel()
+        logo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "resources", "icon.png"))
+        if os.path.exists(logo_path):
+            size = 30
+            radius = 6
+            src_pixmap = QPixmap(logo_path)
+            if not src_pixmap.isNull():
+                target = QPixmap(size, size)
+                target.fill(Qt.GlobalColor.transparent)
+                
+                painter = QPainter(target)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                
+                path = QPainterPath()
+                path.addRoundedRect(0, 0, size, size, radius, radius)
+                painter.setClipPath(path)
+                
+                scaled = src_pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                x = (size - scaled.width()) // 2
+                y = (size - scaled.height()) // 2
+                painter.drawPixmap(x, y, scaled)
+                painter.end()
+                
+                logo_lbl.setPixmap(target)
+        logo_lbl.setStyleSheet("background:transparent;")
+        lay.addWidget(logo_lbl)
+        lay.addSpacing(8)
+
+        title = QLabel("KathFlow Studio")
         title.setStyleSheet(
             "font-size: 17px; font-weight: 700; color: #e6edf3; background:transparent;"
         )

@@ -448,7 +448,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("KathFlow Studio — Slide To Video")
         self.setMinimumSize(960, 640)
-        self.resize(1180, 740)
+        self.resize(1380, 740)
         self.setStyleSheet(STYLESHEET)
 
         # ── Core objects ─────────────────────────────────────────────────

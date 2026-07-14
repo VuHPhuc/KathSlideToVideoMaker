@@ -190,7 +190,7 @@ _ALL_EXTS    = _SLIDE_EXTS + _VIDEO_EXTS + _IMAGE_EXTS
 
 
 class MediaDropZone(QFrame):
-    """Drop zone nhận PPTX/PDF/Video/Ảnh — phát tín hiệu (path, media_type)."""
+    """Drop zone nhận PPTX/PDF/Video/Ảnh kiêm hiển thị preview."""
     file_dropped = pyqtSignal(str, str)  # path, media_type
 
     _IDLE = """QFrame#mediaDropZone {
@@ -199,24 +199,56 @@ class MediaDropZone(QFrame):
     _HOVER = """QFrame#mediaDropZone {
         background-color: #1a0e36; border: 2px dashed #7c3aed; border-radius: 10px;
     }"""
+    _PREVIEW = """QFrame#mediaDropZone {
+        background-color: #161b22; border: 1px solid #30363d; border-radius: 10px;
+    }"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("mediaDropZone")
         self.setAcceptDrops(True)
-        self.setFixedHeight(38)
+        self.setMinimumHeight(140)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.setStyleSheet(self._IDLE)
+        self._in_preview_mode = False
+        self._current_item = None
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 2, 12, 2)
-        lay.setSpacing(10)
+        self.main_lay = QVBoxLayout(self)
+        self.main_lay.setContentsMargins(12, 12, 12, 12)
+        self.main_lay.setSpacing(10)
 
-        self._lbl = QLabel("Kéo & thả media vào đây hoặc:")
+        # ── 1. Giao diện Trạng thái Trống (Empty State) ──
+        self._empty_container = QWidget()
+        self._empty_container.setStyleSheet("background:transparent;")
+        empty_lay = QVBoxLayout(self._empty_container)
+        empty_lay.setContentsMargins(0, 0, 0, 0)
+        empty_lay.setSpacing(10)
+        empty_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Nhãn "Chọn một item để xem trước"
+        self._preview_lbl = QLabel("Chọn một item để xem trước")
+        self._preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_lbl.setStyleSheet(
+            "color:#8b949e; font-size:12px; font-weight:600; background:transparent;"
+        )
+        empty_lay.addWidget(self._preview_lbl)
+
+        # Nhãn hướng dẫn kéo thả
+        self._lbl = QLabel("Kéo & thả PPTX · PDF · Video · Ảnh vào đây hoặc:")
+        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl.setStyleSheet("color:#7d8590; font-size:11px; background:transparent;")
-        lay.addWidget(self._lbl)
+        empty_lay.addWidget(self._lbl)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(4)
+        # Hàng nút bấm Import
+        btn_row_widget = QWidget()
+        btn_row_widget.setStyleSheet("background:transparent;")
+        btn_row = QHBoxLayout(btn_row_widget)
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+        btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         buttons = [
             ("Import PPTX",  "*.pptx",                "slide"),
             ("Import PDF",   "*.pdf",                  "slide"),
@@ -240,8 +272,33 @@ class MediaDropZone(QFrame):
                 lambda _, f=filt, m=mtype: self._open_dialog(f, m)
             )
             btn_row.addWidget(btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
+        empty_lay.addWidget(btn_row_widget)
+
+        self.main_lay.addWidget(self._empty_container, 1)
+
+        # ── 2. Giao diện Xem trước (Preview State) ──
+        self._preview_container = QWidget()
+        self._preview_container.setStyleSheet("background:transparent;")
+        preview_lay = QVBoxLayout(self._preview_container)
+        preview_lay.setContentsMargins(0, 0, 0, 0)
+        preview_lay.setSpacing(8)
+        preview_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._image_lbl = QLabel()
+        self._image_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_lbl.setStyleSheet("background:transparent;")
+        self._image_lbl.setScaledContents(False)
+        preview_lay.addWidget(self._image_lbl, 1)
+
+        self._preview_title = QLabel("")
+        self._preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_title.setStyleSheet(
+            "color:#c9d1d9; font-size:10px; font-weight:600; background:transparent;"
+        )
+        preview_lay.addWidget(self._preview_title)
+
+        self.main_lay.addWidget(self._preview_container, 1)
+        self._preview_container.setVisible(False)
 
     def _open_dialog(self, filt: str, media_type: str):
         from PyQt6.QtCore import QSettings
@@ -258,7 +315,6 @@ class MediaDropZone(QFrame):
             "image": "Ảnh",
         }
         ext_label = label_map.get(media_type, media_type)
-        # Cho phép chọn NHIỀU file cùng lúc
         paths, _ = QFileDialog.getOpenFileNames(
             self, f"Mở {ext_label}", last_dir,
             f"{ext_label} ({filt});;Tất cả (*.*)"
@@ -275,33 +331,84 @@ class MediaDropZone(QFrame):
         if ext in _IMAGE_EXTS:  return "image"
         return None
 
+    def show_empty_state(self):
+        self._in_preview_mode = False
+        self._current_item = None
+        self.setStyleSheet(self._IDLE)
+        self._preview_container.setVisible(False)
+        self._empty_container.setVisible(True)
+        self._lbl.setText("Kéo & thả PPTX · PDF · Video · Ảnh vào đây hoặc:")
+
+    def show_preview(self, item: MediaItem):
+        self._in_preview_mode = True
+        self._current_item = item
+        self.setStyleSheet(self._PREVIEW)
+        self._empty_container.setVisible(False)
+        self._preview_container.setVisible(True)
+        self._update_preview_pixmap()
+
+    def _update_preview_pixmap(self):
+        if not self._current_item:
+            return
+        img_path = self._current_item.image_path
+        if img_path and os.path.exists(img_path):
+            pix = QPixmap(img_path)
+            w = max(100, self.width() - 24)
+            h = max(100, self.height() - 48)
+            self._image_lbl.setPixmap(
+                pix.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self._image_lbl.setText("")
+        else:
+            icons = {"slide": "📊", "video": "🎬", "image": "🖼️"}
+            self._image_lbl.setPixmap(QPixmap())
+            self._image_lbl.setText(
+                icons.get(self._current_item.media_type, "?") + "  " + self._current_item.display_name
+            )
+        self._preview_title.setText(self._current_item.display_name)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._in_preview_mode and self._current_item:
+            self._update_preview_pixmap()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            # Chấp nhận nếu ÍT NHẤT 1 file hợp lệ
             for url in event.mimeData().urls():
                 if self._classify(url.toLocalFile()):
                     event.acceptProposedAction()
                     self.setStyleSheet(self._HOVER)
                     n = len(event.mimeData().urls())
-                    self._lbl.setText(
-                        f"Thả {n} file vào đây ✓" if n > 1 else "Thả file vào đây ✓"
-                    )
+                    if not self._in_preview_mode:
+                        self._lbl.setText(
+                            f"Thả {n} file vào đây ✓" if n > 1 else "Thả file vào đây ✓"
+                        )
                     return
         event.ignore()
 
     def dragLeaveEvent(self, event):
-        self.setStyleSheet(self._IDLE)
-        self._lbl.setText("Kéo & thả  PPTX · PDF · Video · Ảnh  vào đây")
+        if self._in_preview_mode:
+            self.setStyleSheet(self._PREVIEW)
+        else:
+            self.setStyleSheet(self._IDLE)
+            self._lbl.setText("Kéo & thả PPTX · PDF · Video · Ảnh vào đây hoặc:")
 
     def dropEvent(self, event):
-        self.setStyleSheet(self._IDLE)
-        self._lbl.setText("Kéo & thả  PPTX · PDF · Video · Ảnh  vào đây")
-        # Xử lý TẤT CẢ files được thả vào
+        if self._in_preview_mode:
+            self.setStyleSheet(self._PREVIEW)
+        else:
+            self.setStyleSheet(self._IDLE)
+            self._lbl.setText("Kéo & thả PPTX · PDF · Video · Ảnh vào đây hoặc:")
         for url in event.mimeData().urls():
             path  = url.toLocalFile()
             mtype = self._classify(path)
             if mtype:
                 self.file_dropped.emit(path, mtype)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -999,11 +1106,6 @@ class SlideSyncTab(QWidget):
         hdr.addWidget(clear_btn)
         lay.addLayout(hdr)
 
-        # Drop zone
-        self._drop_zone = MediaDropZone()
-        self._drop_zone.file_dropped.connect(self._on_file_dropped)
-        lay.addWidget(self._drop_zone)
-
         # Progress
         self._import_progress = QProgressBar()
         self._import_progress.setFixedHeight(4)
@@ -1017,32 +1119,10 @@ class SlideSyncTab(QWidget):
         lay.addWidget(self._import_progress)
         lay.addWidget(self._import_status)
 
-        # Large preview — flexible height (co giãn với cửa sổ)
-        preview_frame = QFrame()
-        preview_frame.setObjectName("card")
-        preview_frame.setMinimumHeight(100)
-        preview_frame.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        p_lay = QVBoxLayout(preview_frame)
-        p_lay.setContentsMargins(6, 4, 6, 4)
-
-        self._preview_lbl = QLabel("Chọn một item để xem trước")
-        self._preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_lbl.setStyleSheet(
-            "color:#484f58; font-size:12px; background:transparent;"
-        )
-        self._preview_lbl.setScaledContents(False)
-        p_lay.addWidget(self._preview_lbl, 1)
-
-        self._preview_title = QLabel("")
-        self._preview_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_title.setStyleSheet(
-            "color:#c9d1d9; font-size:10px; font-weight:600; background:transparent;"
-        )
-        p_lay.addWidget(self._preview_title)
-        # Stretch factor = 1 → preview nhận toàn bộ không gian thừa
-        lay.addWidget(preview_frame, 1)
+        # Combined Drop Zone & Large Preview — flexible height (co giãn với cửa sổ)
+        self._drop_zone = MediaDropZone()
+        self._drop_zone.file_dropped.connect(self._on_file_dropped)
+        lay.addWidget(self._drop_zone, 1)
 
         # Audio mix panel (chỉ hiện khi chọn video)
         self._audio_mix = AudioMixPanel()
@@ -1279,25 +1359,7 @@ class SlideSyncTab(QWidget):
             return
 
         # Update large preview
-        img_path = item.image_path
-        if img_path and os.path.exists(img_path):
-            pix = QPixmap(img_path)
-            self._preview_lbl.setPixmap(
-                pix.scaled(
-                    self._preview_lbl.width() - 4, 110,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-            self._preview_lbl.setText("")
-        else:
-            icons = {"slide": "📊", "video": "🎬", "image": "🖼️"}
-            self._preview_lbl.setPixmap(QPixmap())
-            self._preview_lbl.setText(
-                icons.get(item.media_type, "?") + "  " + item.display_name
-            )
-
-        self._preview_title.setText(item.display_name)
+        self._drop_zone.show_preview(item)
 
         # Audio mix panel
         self._audio_mix.set_item(item)
@@ -1331,9 +1393,7 @@ class SlideSyncTab(QWidget):
         self._media_items = [i for i in self._media_items if i.id != item_id]
         if self._selected_id == item_id:
             self._selected_id = None
-            self._preview_lbl.setPixmap(QPixmap())
-            self._preview_lbl.setText("Chọn một item để xem trước")
-            self._preview_title.setText("")
+            self._drop_zone.show_empty_state()
             self._audio_mix.setVisible(False)
             self._assign_btn.setEnabled(False)
         self._rebuild_timeline()
@@ -1404,6 +1464,9 @@ class SlideSyncTab(QWidget):
         ) == QMessageBox.StandardButton.Yes:
             self._media_items.clear()
             self._selected_id = None
+            self._drop_zone.show_empty_state()
+            self._audio_mix.setVisible(False)
+            self._assign_btn.setEnabled(False)
             self._rebuild_timeline()
             self._editor.blockSignals(True)
             self._editor.setPlainText(self._script_text)

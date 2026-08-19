@@ -295,7 +295,7 @@ class ExportThread(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)   # success, error_message
 
-    def __init__(self, pipeline, text, engine, speaker_id, output_path, use_whisper, speed=1.0):
+    def __init__(self, pipeline, text, engine, speaker_id, output_path, use_whisper, speed=1.0, period_pause_ms=300, comma_pause_val="normal"):
         super().__init__()
         self.pipeline    = pipeline
         self.text        = text
@@ -304,6 +304,8 @@ class ExportThread(QThread):
         self.output_path = output_path
         self.use_whisper = use_whisper
         self.speed       = speed
+        self.period_pause_ms = period_pause_ms
+        self.comma_pause_val = comma_pause_val
 
     def run(self):
         try:
@@ -315,6 +317,8 @@ class ExportThread(QThread):
                 self.progress.emit,
                 self.use_whisper,
                 speed=self.speed,
+                period_pause_ms=self.period_pause_ms,
+                comma_pause_val=self.comma_pause_val,
             )
             self.finished.emit(True, "")
         except Exception as exc:
@@ -324,21 +328,33 @@ class ExportThread(QThread):
 class PreviewThread(QThread):
     finished = pyqtSignal(bool, str, str)  # success, wav_path, error
 
-    def __init__(self, engine, model_name, speaker_id, text, speed=1.0):
+    def __init__(self, pipeline, engine, model_name, speaker_id, text, speed=1.0, period_pause_ms=300, comma_pause_val="normal"):
         super().__init__()
+        self.pipeline    = pipeline
         self.engine      = engine
         self.model_name  = model_name
         self.speaker_id  = speaker_id
         self.text        = text
         self.speed       = speed
-        self._tmp_wav    = ""
+        self.period_pause_ms = period_pause_ms
+        self.comma_pause_val = comma_pause_val
 
     def run(self):
         try:
             self.engine.load_model(self.model_name)
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             tmp.close()
-            self.engine.synthesize(self.text, tmp.name, self.speaker_id, speed=self.speed)
+            self.pipeline.run(
+                self.text,
+                self.engine,
+                self.speaker_id,
+                tmp.name,
+                progress_callback=None,
+                use_whisper_align=False,
+                speed=self.speed,
+                period_pause_ms=self.period_pause_ms,
+                comma_pause_val=self.comma_pause_val,
+            )
             self.finished.emit(True, tmp.name, "")
         except Exception as exc:
             self.finished.emit(False, "", str(exc))
@@ -784,6 +800,60 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(4)
 
+        # Cấu hình dừng nghỉ dấu . và ,
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        
+        # Period Pause
+        lay.addWidget(self._make_label("Thời gian dừng ở dấu chấm (.):"))
+        self._period_pause_combo = QComboBox()
+        period_pauses = [
+            ("Cực ngắn (0.1s)", 100),
+            ("Ngắn (0.2s)", 200),
+            ("Vừa đủ (0.3s)", 300),
+            ("Trung bình (0.5s) [Mặc định]", 500),
+            ("Dài (0.8s)", 800),
+            ("Rất dài (1.2s)", 1200),
+            ("Cực dài (2.0s)", 2000),
+        ]
+        for label, val in period_pauses:
+            self._period_pause_combo.addItem(label, val)
+        
+        last_period = settings.value("last_period_pause", "Trung bình (0.5s) [Mặc định]")
+        idx = self._period_pause_combo.findText(last_period)
+        if idx >= 0:
+            self._period_pause_combo.setCurrentIndex(idx)
+        else:
+            self._period_pause_combo.setCurrentIndex(3) # Default to 0.5s
+            
+        self._period_pause_combo.currentTextChanged.connect(self._save_period_pause_setting)
+        lay.addWidget(self._period_pause_combo)
+
+        # Comma Pause
+        lay.addWidget(self._make_label("Thời gian dừng ở dấu phẩy (,):"))
+        self._comma_pause_combo = QComboBox()
+        comma_pauses = [
+            ("Đọc bình thường", "normal"),
+            ("Không dừng (0s)", "none"),
+            ("Cực ngắn (0.1s)", 100),
+            ("Ngắn (0.2s) [Mặc định]", 200),
+            ("Trung bình (0.3s)", 300),
+            ("Dài (0.5s)", 500),
+        ]
+        for label, val in comma_pauses:
+            self._comma_pause_combo.addItem(label, val)
+            
+        last_comma = settings.value("last_comma_pause", "Ngắn (0.2s) [Mặc định]")
+        idx = self._comma_pause_combo.findText(last_comma)
+        if idx >= 0:
+            self._comma_pause_combo.setCurrentIndex(idx)
+        else:
+            self._comma_pause_combo.setCurrentIndex(3) # Default to 0.2s
+            
+        self._comma_pause_combo.currentTextChanged.connect(self._save_comma_pause_setting)
+        lay.addWidget(self._comma_pause_combo)
+
+        lay.addSpacing(4)
+
         # Output path row
         lay.addWidget(self._make_label("Đường dẫn lưu file .mp3:"))
         out_row = QHBoxLayout()
@@ -1026,6 +1096,14 @@ class MainWindow(QMainWindow):
         settings = QSettings("KathTTS", "KathSlideToVideoMaker")
         settings.setValue("last_selected_speed", speed_text)
 
+    def _save_period_pause_setting(self, text: str):
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("last_period_pause", text)
+
+    def _save_comma_pause_setting(self, text: str):
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("last_comma_pause", text)
+
     # ═══════════════════════════════════════════════════════════════════
     #  EVENT HANDLERS
     # ═══════════════════════════════════════════════════════════════════
@@ -1091,6 +1169,9 @@ class MainWindow(QMainWindow):
 
         speaker_id = self._speaker_combo.currentData() or 0
         speed = self._speed_combo.currentData() or 1.0
+        period_pause_ms = self._period_pause_combo.currentData()
+        comma_pause_val = self._comma_pause_combo.currentData()
+        
         self._preview_btn.setEnabled(False)
         self._set_status("Đang tạo preview giọng…")
 
@@ -1119,7 +1200,8 @@ class MainWindow(QMainWindow):
             preview_text = preview_text[:150] + "..."
 
         self._preview_thread = PreviewThread(
-            self._engine, model_name, speaker_id, preview_text, speed=speed
+            self._pipeline, self._engine, model_name, speaker_id, preview_text, speed=speed,
+            period_pause_ms=period_pause_ms, comma_pause_val=comma_pause_val
         )
         self._preview_thread.finished.connect(self._on_preview_finished)
         self._preview_thread.start()
@@ -1203,6 +1285,8 @@ class MainWindow(QMainWindow):
         speaker_id  = self._speaker_combo.currentData() or 0
         use_whisper = self._whisper_check.isChecked()
         speed       = self._speed_combo.currentData() or 1.0
+        period_pause_ms = self._period_pause_combo.currentData()
+        comma_pause_val = self._comma_pause_combo.currentData()
 
         self._export_btn.setEnabled(False)
         self._export_progress.setVisible(True)
@@ -1211,6 +1295,7 @@ class MainWindow(QMainWindow):
         self._export_thread = ExportThread(
             self._pipeline, text, self._engine,
             speaker_id, output_path, use_whisper, speed=speed,
+            period_pause_ms=period_pause_ms, comma_pause_val=comma_pause_val,
         )
         self._export_thread.progress.connect(self._on_export_progress)
         self._export_thread.finished.connect(self._on_export_finished)

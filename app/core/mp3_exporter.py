@@ -6,7 +6,7 @@ import json
 import re
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional, Union, Tuple
 
 from pydub import AudioSegment
 
@@ -65,18 +65,101 @@ def split_into_sentences(text: str) -> List[str]:
 
 # ── Export Pipeline ─────────────────────────────────────────────────────────
 
+def split_text_by_punctuation(
+    text: str,
+    period_pause_ms: int,
+    comma_pause_val: Union[str, int],
+) -> List[Tuple[str, int]]:
+    """
+    Tách văn bản thành các phân đoạn, mỗi phân đoạn đi kèm thời gian dừng nghỉ (ms) ở sau nó.
+    """
+    # Chuẩn hóa line endings
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Nếu cài đặt phẩy là không dừng (0s), xóa toàn bộ dấu phẩy
+    if comma_pause_val == "none":
+        text = text.replace(",", " ")
+
+    # Tách theo đoạn (double newline) trước
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+    segments: List[Tuple[str, int]] = []
+    
+    for para in paragraphs:
+        # Thay single newline bằng space trong mỗi đoạn
+        para = re.sub(r"\n", " ", para)
+        
+        # Quyết định regex tách dựa trên comma_pause_val
+        if isinstance(comma_pause_val, int):
+            # Tách bởi cả dấu chấm/kết câu (.!?…) và dấu phẩy (,)
+            pattern = r"([.!?…]+|,)"
+            parts = re.split(pattern, para)
+            
+            current_text = ""
+            for i in range(0, len(parts), 2):
+                text_part = parts[i].strip()
+                delim = parts[i+1] if i + 1 < len(parts) else ""
+                
+                if text_part:
+                    if current_text:
+                        current_text += " " + text_part
+                    else:
+                        current_text = text_part
+                
+                if delim:
+                    if not current_text:
+                        continue
+                    
+                    if delim == ",":
+                        pause_ms = comma_pause_val
+                    else:
+                        pause_ms = period_pause_ms
+                    
+                    segments.append((current_text, pause_ms))
+                    current_text = ""
+            
+            if current_text:
+                segments.append((current_text, period_pause_ms))
+        else:
+            # Chỉ tách bởi dấu chấm/kết câu (.!?…)
+            pattern = r"([.!?…]+)"
+            parts = re.split(pattern, para)
+            
+            current_text = ""
+            for i in range(0, len(parts), 2):
+                text_part = parts[i].strip()
+                delim = parts[i+1] if i + 1 < len(parts) else ""
+                
+                if text_part:
+                    if current_text:
+                        current_text += " " + text_part
+                    else:
+                        current_text = text_part
+                
+                if delim:
+                    if not current_text:
+                        continue
+                    segments.append((current_text, period_pause_ms))
+                    current_text = ""
+            
+            if current_text:
+                segments.append((current_text, period_pause_ms))
+
+    return segments
+
+
+from typing import Tuple
+
+
 class ExportPipeline:
     """
     Pipeline xuất MP3 + JSON timestamps:
-    1. Piper TTS → WAV từng câu
-    2. Ghép WAV + thêm khoảng lặng giữa câu
-    3. faster-whisper → word-level timestamps
-    4. pydub → MP3 192kbps
-    5. Lưu JSON timestamps
+    1. Piper/Edge TTS → WAV từng câu
+    2. Ghép WAV + thêm khoảng lặng giữa câu dựa theo setting người dùng
+    3. faster-whisper → word-level timestamps (nếu bật)
+    4. pydub → MP3 (hoặc WAV cho preview)
+    5. Lưu JSON timestamps (nếu là MP3)
     """
-
-    SILENCE_BETWEEN_SENTENCES_MS = 150   # ms lặng ngắn giữa các câu để có điểm dừng nhẹ
-    SILENCE_BETWEEN_PARAGRAPHS_MS = 250  # ms lặng ngắn giữa đoạn văn
 
     def __init__(self):
         self._whisper_model = None
@@ -125,6 +208,8 @@ class ExportPipeline:
         progress_callback: Callable[[int, str], None] = None,
         use_whisper_align: bool = True,
         speed: float = 1.0,
+        period_pause_ms: int = 300,
+        comma_pause_val: Union[str, int] = "normal",
     ) -> Dict[str, Any]:
         """
         Chạy toàn bộ pipeline.
@@ -133,27 +218,29 @@ class ExportPipeline:
         """
         self._ensure_ffmpeg()
 
-        sentences = split_into_sentences(text)
-        if not sentences:
+        segments = split_text_by_punctuation(text, period_pause_ms, comma_pause_val)
+        if not segments:
             raise ValueError("Văn bản trống — không có câu nào để xử lý.")
 
         def _prog(pct: int, msg: str):
             if progress_callback:
                 progress_callback(pct, msg)
 
-        # ── Bước 1: TTS từng câu → WAV ──────────────────────────────────────
+        # ── Bước 1: TTS từng phân đoạn → WAV ──────────────────────────────────────
         wav_segments: List[AudioSegment] = []
         sentence_durations_ms: List[int] = []
 
-        n = len(sentences)
+        n = len(segments)
+        is_preview = output_mp3.lower().endswith(".wav")
+        
         with tempfile.TemporaryDirectory() as tmp_dir:
 
-            for i, sentence in enumerate(sentences):
+            for i, (seg_text, pause_ms) in enumerate(segments):
                 pct_start = int(i / n * 55)          # TTS chiếm 0–55%
                 _prog(pct_start, f"Đang đọc câu {i + 1}/{n}...")
 
                 wav_path = f"{tmp_dir}/seg_{i:04d}.wav"
-                tts_engine.synthesize(sentence, wav_path, speaker_id, speed=speed)
+                tts_engine.synthesize(seg_text, wav_path, speaker_id, speed=speed)
 
                 seg = AudioSegment.from_wav(wav_path)
                 seg = trim_silence(seg)
@@ -163,28 +250,29 @@ class ExportPipeline:
             # ── Bước 2: Ghép audio + thêm lặng ─────────────────────────────
             _prog(56, "Đang ghép audio...")
 
-            pause = AudioSegment.silent(duration=self.SILENCE_BETWEEN_SENTENCES_MS)
             combined = AudioSegment.empty()
             for i, seg in enumerate(wav_segments):
                 combined += seg
                 if i < len(wav_segments) - 1:
-                    combined += pause
+                    pause_ms = segments[i][1]
+                    if pause_ms > 0:
+                        combined += AudioSegment.silent(duration=pause_ms)
 
             # Tính sentence timestamps chính xác từ độ dài WAV riêng lẻ
             sentence_data: List[Dict[str, Any]] = []
             cursor_ms = 0
-            for i, (sentence, dur_ms) in enumerate(zip(sentences, sentence_durations_ms)):
+            for i, ((seg_text, pause_ms), dur_ms) in enumerate(zip(segments, sentence_durations_ms)):
                 sentence_data.append({
                     "index":    i,
-                    "text":     sentence,
+                    "text":     seg_text,
                     "start_ms": cursor_ms,
                     "end_ms":   cursor_ms + dur_ms,
                     "words":    [],
                 })
-                cursor_ms += dur_ms + self.SILENCE_BETWEEN_SENTENCES_MS
+                cursor_ms += dur_ms + pause_ms
 
             # ── Bước 3: Whisper word-level alignment ────────────────────────
-            if use_whisper_align:
+            if use_whisper_align and not is_preview:
                 _prog(60, "Đang tải Whisper model...")
                 self._load_whisper(progress_callback)
 
@@ -217,11 +305,19 @@ class ExportPipeline:
                         if sent["start_ms"] <= w["start_ms"] < sent["end_ms"]
                     ]
 
-            # ── Bước 4: Xuất MP3 ────────────────────────────────────────────
-            _prog(90, "Đang xuất MP3...")
-            combined.export(output_mp3, format="mp3", bitrate="192k")
+            # ── Bước 4: Xuất Audio ────────────────────────────────────────────
+            if is_preview:
+                _prog(90, "Đang xuất WAV preview...")
+                combined.export(output_mp3, format="wav")
+            else:
+                _prog(90, "Đang xuất MP3...")
+                combined.export(output_mp3, format="mp3", bitrate="192k")
 
         # ── Bước 5: Lưu JSON ────────────────────────────────────────────────
+        if is_preview:
+            _prog(100, "✓ Hoàn thành preview!")
+            return {}
+            
         _prog(97, "Đang ghi file timestamps JSON...")
 
         result: Dict[str, Any] = {

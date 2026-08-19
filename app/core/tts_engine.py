@@ -253,13 +253,16 @@ class TTSEngine:
         normalized_text = re.sub(r"\b\d{1,3}(\.\d{3})+(?!\d)", remove_thousands_dots, normalized_text)
         
         # 2. Viết rõ đơn vị tốc độ "km/h", "kmh" -> "ki-lô-mét trên giờ"
-        normalized_text = re.sub(r"\bkm/?h\b|(?<=\d)km/?h\b", "ki-lô-mét trên giờ", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"\bkm/?h\b", "ki-lô-mét trên giờ", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"(?<=\d)km/?h\b", " ki-lô-mét trên giờ", normalized_text, flags=re.IGNORECASE)
         
         # 3. Viết rõ đơn vị tốc độ "m/s", "ms" -> "mét trên giây"
-        normalized_text = re.sub(r"\bm/?s\b|(?<=\d)m/?s\b", "mét trên giây", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"\bm/?s\b", "mét trên giây", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"(?<=\d)m/?s\b", " mét trên giây", normalized_text, flags=re.IGNORECASE)
         
         # 4. Viết rõ viết tắt đơn vị "km" -> "ki-lô-mét"
-        normalized_text = re.sub(r"\bkm\b|(?<=\d)km\b", "ki-lô-mét", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"\bkm\b", "ki-lô-mét", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"(?<=\d)km\b", " ki-lô-mét", normalized_text, flags=re.IGNORECASE)
 
         text = normalized_text
 
@@ -288,6 +291,8 @@ class TTSEngine:
             # Thay thế dấu kết câu thành dấu phẩy để có điểm dừng nghỉ cực ngắn (comma-style pause)
             import re
             tts_text = re.sub(r"[.!?…]+", ",", text)
+            if tts_text and not tts_text.endswith(","):
+                tts_text += ","
 
             # Ánh xạ tốc độ đọc (ví dụ: speed = 1.3 -> +30%)
             rate_pct = round((speed - 1.0) * 100)
@@ -352,6 +357,8 @@ class TTSEngine:
         # Thay thế dấu kết câu thành dấu phẩy để có điểm dừng nghỉ cực ngắn (comma-style pause)
         import re
         tts_text = re.sub(r"[.!?…]+", ",", text)
+        if tts_text and not tts_text.endswith(","):
+            tts_text += ","
         
         with wave.open(output_wav_path, "wb") as wav_file:
             self._voice.synthesize_wav(tts_text, wav_file, syn_config=syn_config)

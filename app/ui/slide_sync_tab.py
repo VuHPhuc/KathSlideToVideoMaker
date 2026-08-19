@@ -748,12 +748,14 @@ class SlideSyncTab(QWidget):
         self._import_queue:  List[tuple[str, str]]        = []  # [(path, media_type)]
         self._is_importing:  bool                         = False
 
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
         self._sub_settings = {
-            "enabled":   True,
-            "font_size": 20,
-            "color":     "Trắng",
-            "style":     "Viền đen",
-            "position":  3,
+            "enabled":   settings.value("sub_enabled", True, type=bool),
+            "font_size": settings.value("sub_font_size", 20, type=int),
+            "color":     settings.value("sub_color", "Trắng"),
+            "style":     settings.value("sub_style", "Viền đen"),
+            "position":  settings.value("sub_position", 5, type=int),
         }
 
         self._build_ui()
@@ -1862,6 +1864,14 @@ class SlideSyncTab(QWidget):
         self._sub_settings["color"]     = self._sub_color_combo.currentText()
         self._sub_settings["style"]     = self._sub_style_combo.currentText()
         self._sub_settings["position"]  = self._sub_pos_slider.value()
+
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("sub_enabled", self._sub_settings["enabled"])
+        settings.setValue("sub_font_size", self._sub_settings["font_size"])
+        settings.setValue("sub_color", self._sub_settings["color"])
+        settings.setValue("sub_style", self._sub_settings["style"])
+        settings.setValue("sub_position", self._sub_settings["position"])
 
     def _sync_sub_controls(self):
         for w in [self._sub_enable_cb, self._sub_size_combo,

@@ -344,7 +344,19 @@ class ClipBlock(QFrame):
         pixmap = self.grab()
         drag.setPixmap(pixmap)
         drag.setHotSpot(event.position().toPoint())
-        drag.exec(Qt.DropAction.MoveAction)
+        
+        parent_timeline = self.parentWidget()
+        while parent_timeline and not isinstance(parent_timeline, TimelineWidget):
+            parent_timeline = parent_timeline.parentWidget()
+            
+        if parent_timeline:
+            parent_timeline.start_drag_session(self.item.id)
+
+        res = drag.exec(Qt.DropAction.MoveAction)
+        success = (res != Qt.DropAction.IgnoreAction)
+        
+        if parent_timeline:
+            parent_timeline.end_drag_session(success)
 
     def set_position_flags(self, is_first: bool, is_last: bool):
         self._is_first = is_first
@@ -379,6 +391,34 @@ class ClipBlock(QFrame):
         else:
             self.item.tts_volume = 1.0
         self.settings_changed.emit()
+
+    def set_dragging(self, val: bool):
+        if val:
+            self.setStyleSheet("""
+                QFrame#clipBlock {
+                    background: #11141a;
+                    border: 1.5px dashed #30363d;
+                    border-radius: 8px;
+                }
+            """)
+            self._thumb.setVisible(False)
+            self._name_lbl.setVisible(False)
+            self._type_lbl.setVisible(False)
+            self._dur_lbl.setVisible(False)
+            self._remove_btn.setVisible(False)
+            self._intro_btn.setVisible(False)
+            self._ending_btn.setVisible(False)
+        else:
+            self._thumb.setVisible(True)
+            self._name_lbl.setVisible(True)
+            self._type_lbl.setVisible(True)
+            self._dur_lbl.setVisible(True)
+            self._remove_btn.setVisible(True)
+            self._apply_style()
+            is_vid = self.item.media_type == "video"
+            self._intro_btn.setVisible(self._is_first and is_vid)
+            self._ending_btn.setVisible(self._is_last and is_vid)
+            self.update_flags()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -644,6 +684,67 @@ class TimelineWidget(QWidget):
         self._inner_lay.addStretch()
         self._inner.setMinimumWidth(max(420, total_w))
 
+    def start_drag_session(self, item_id: str):
+        self._dragging_id = item_id
+        self._original_items = list(self._items)
+        block = self._clip_widgets.get(item_id)
+        if block:
+            block.set_dragging(True)
+
+    def end_drag_session(self, success: bool = True):
+        if not success and hasattr(self, "_original_items") and self._original_items:
+            self._items = list(self._original_items)
+            
+        if hasattr(self, "_dragging_id") and self._dragging_id:
+            block = self._clip_widgets.get(self._dragging_id)
+            if block:
+                block.set_dragging(False)
+            self._dragging_id = None
+            
+        self._original_items = None
+        self._rebuild()
+        self.reordered.emit()
+
+    def _rebuild_layout(self):
+        while self._inner_lay.count():
+            item = self._inner_lay.takeAt(0)
+            # We don't delete here to keep widgets in memory for re-parenting if needed
+
+        if not self._items:
+            self._show_empty()
+            return
+
+        for n, item in enumerate(self._items, start=1):
+            item._display_number = n
+
+        total_w = 20
+        for i, item in enumerate(self._items):
+            if i > 0:
+                node_idx = i - 1
+                if node_idx < len(self._trans_nodes):
+                    node = self._trans_nodes[node_idx]
+                    node.update_type(item.transition_in)
+                    node.index = node_idx
+                else:
+                    node = TransitionNode(node_idx, item.transition_in)
+                    node.clicked.connect(self._on_transition_clicked)
+                    self._trans_nodes.append(node)
+                self._inner_lay.addWidget(node)
+                total_w += TRANS_W
+
+            block = self._clip_widgets.get(item.id)
+            if block:
+                is_first = (i == 0)
+                is_last = (i == len(self._items) - 1)
+                block.set_position_flags(is_first, is_last)
+                block.update_flags()
+                block.refresh_duration()
+                self._inner_lay.addWidget(block)
+                total_w += CLIP_W
+
+        self._inner_lay.addStretch()
+        self._inner.setMinimumWidth(max(420, total_w))
+
     def update_all_clips(self):
         """Cập nhật cờ và trạng thái của tất cả các clip block trong timeline."""
         for i, item in enumerate(self._items):
@@ -685,15 +786,11 @@ class TimelineWidget(QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-kath-media-id"):
             event.acceptProposedAction()
- 
+
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat("application/x-kath-media-id"):
             event.acceptProposedAction()
- 
-    def dropEvent(self, event):
-        mime = event.mimeData()
-        if mime.hasFormat("application/x-kath-media-id"):
-            item_id = mime.data("application/x-kath-media-id").data().decode("utf-8")
+            item_id = event.mimeData().data("application/x-kath-media-id").data().decode("utf-8")
             
             src_idx = -1
             for idx, item in enumerate(self._items):
@@ -702,7 +799,6 @@ class TimelineWidget(QWidget):
                     break
             
             if src_idx != -1:
-                # Tính target_idx dựa trên toạ độ X tại inner widget
                 local_pos = self._inner.mapFromGlobal(QCursor.pos())
                 drop_x = local_pos.x()
                 
@@ -719,14 +815,17 @@ class TimelineWidget(QWidget):
                 if not found:
                     target_idx = len(self._items)
                     
-                if src_idx != target_idx:
-                    item = self._items.pop(src_idx)
-                    if target_idx > src_idx:
-                        self._items.insert(target_idx - 1, item)
-                    else:
-                        self._items.insert(target_idx, item)
-                    self._rebuild()
-                    self.reordered.emit()
+                actual_target = target_idx
+                if target_idx > src_idx:
+                    actual_target = target_idx - 1
+                    
+                if src_idx != actual_target:
+                    dragged_item = self._items.pop(src_idx)
+                    self._items.insert(actual_target, dragged_item)
+                    self._rebuild_layout()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat("application/x-kath-media-id"):
             event.acceptProposedAction()
 
     def eventFilter(self, obj, event) -> bool:

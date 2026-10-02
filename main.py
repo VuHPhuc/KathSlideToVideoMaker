@@ -7,6 +7,11 @@ import os
 import sys
 import warnings
 
+# Ensure bundled/venv ffmpeg is in PATH
+venv_scripts = os.path.abspath(os.path.join(os.path.dirname(__file__), ".venv", "Scripts"))
+if os.path.exists(os.path.join(venv_scripts, "ffmpeg.exe")):
+    os.environ["PATH"] = venv_scripts + os.pathsep + os.environ.get("PATH", "")
+
 # Suppress Hugging Face symlink warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -14,9 +19,12 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QComboBox
 from PyQt6.QtGui import QFont, QIcon
 from app.ui.main_window import MainWindow
+
+# Vô hiệu hóa tính năng lăn chuột làm đổi lựa chọn trên tất cả các dropdown QComboBox
+QComboBox.wheelEvent = lambda self, event: event.ignore()
 
 
 def main():

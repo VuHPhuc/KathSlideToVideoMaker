@@ -31,13 +31,14 @@ test_speed_13.wav
 *.sln
 *.sw?
 
-# Project exports / media files in root
-/*.mp3
-/*.mp4
-/*.wav
-/*.json
-/*.png
-/*.pdf
-/*.pptx
-/*.slides.json
-
+# Output directory and generated media
+output/
+output/**
+/output/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.pptx
+*.slides.json
+.google_flow_profile/

@@ -33,45 +33,54 @@ class SlideTimedEntry:
 #  CHAR POSITION → TIMESTAMP MAPPING
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_char_to_ms_map(script_text: str, json_data: dict) -> List[tuple[int, int]]:
+def build_char_to_ms_map(script_text: str, json_data: dict) -> List[tuple[int, int, int]]:
     """
-    Xây dựng danh sách (char_pos, time_ms) để biết từng ký tự
-    trong script_text tương ứng với giây nào trong audio.
+    Xây dựng danh sách (char_start_in_full_text, start_ms, end_ms) để biết từng vị trí
+    ký tự trong script_text tương ứng chính xác với mili-giây nào trong audio.
 
     Cách tính:
-    - script_text được chia thành các câu (giống lúc TTS)
-    - JSON có start_ms/end_ms cho từng câu
-    - Nội suy tuyến tính: char_pos trong câu → ms tương ứng
+    - Duyệt trực tiếp qua json_data['sentences'] (chứa danh sách phân đoạn câu & timestamps thực tế từ MP3/TTS).
+    - Định vị vị trí xuất hiện (char_start) của từng câu trong script_text.
     """
-    from app.core.mp3_exporter import split_into_sentences
-
-    sentences = split_into_sentences(script_text)
-    json_sentences = json_data.get("sentences", [])
-
-    # Build mapping: list of (char_start_in_full_text, start_ms, end_ms)
+    json_sentences = json_data.get("sentences", []) if json_data else []
     mapping: List[tuple[int, int, int]] = []
     char_cursor = 0
 
-    for i, sent_text in enumerate(sentences):
-        # Tìm vị trí của câu này trong full text
-        char_start = script_text.find(sent_text, char_cursor)
-        if char_start == -1:
-            char_start = char_cursor
-        char_end = char_start + len(sent_text)
-        char_cursor = char_end
+    if json_sentences:
+        for sent in json_sentences:
+            sent_text = sent.get("text", "").strip()
+            if not sent_text:
+                continue
+            # Tìm vị trí của câu này trong full text
+            char_start = script_text.find(sent_text, char_cursor)
+            if char_start == -1:
+                char_start = script_text.find(sent_text)
+            if char_start == -1:
+                prefix = sent_text[:min(20, len(sent_text))]
+                char_start = script_text.find(prefix, char_cursor)
+            if char_start == -1:
+                char_start = char_cursor
 
-        # Lấy timing từ JSON
-        if i < len(json_sentences):
-            start_ms = json_sentences[i].get("start_ms", 0)
-            end_ms   = json_sentences[i].get("end_ms", start_ms + 1000)
-        else:
-            # Fallback: ước tính 150ms/ký tự
-            prev_end = mapping[-1][2] if mapping else 0
-            start_ms = prev_end + 300
-            end_ms   = start_ms + len(sent_text) * 150
+            start_ms = sent.get("start_ms", 0)
+            end_ms   = sent.get("end_ms", start_ms + 1000)
 
-        mapping.append((char_start, start_ms, end_ms))
+            mapping.append((char_start, start_ms, end_ms))
+            char_cursor = max(char_cursor, char_start + len(sent_text))
+    else:
+        from app.core.mp3_exporter import split_into_sentences
+        sentences = split_into_sentences(script_text)
+        char_cursor = 0
+        for i, s_item in enumerate(sentences):
+            s_text = s_item[0] if isinstance(s_item, (tuple, list)) else str(s_item)
+            char_start = script_text.find(s_text, char_cursor)
+            if char_start == -1:
+                char_start = char_cursor
+            start_ms = i * 4000
+            end_ms = (i + 1) * 4000
+            mapping.append((char_start, start_ms, end_ms))
+            char_cursor = char_start + len(s_text)
 
+    mapping.sort(key=lambda x: x[0])
     return mapping
 
 
@@ -83,18 +92,22 @@ def char_pos_to_ms(char_pos: int, mapping: List[tuple[int, int, int]]) -> float:
     if not mapping:
         return 0.0
 
+    if char_pos <= mapping[0][0]:
+        return float(mapping[0][1])
+
     # Tìm câu chứa char_pos
     for i, (cs, t_start, t_end) in enumerate(mapping):
-        # Lấy char_end từ phần tử tiếp theo
         if i + 1 < len(mapping):
             ce = mapping[i + 1][0]
         else:
-            ce = cs + (t_end - t_start)  # ước tính
+            ce = cs + 1000  # phân đoạn cuối
 
         if cs <= char_pos < ce:
+            if char_pos == cs:
+                return float(t_start)
             # Nội suy tuyến tính
             ratio = (char_pos - cs) / max(1, ce - cs)
-            return t_start + ratio * (t_end - t_start)
+            return float(t_start + ratio * (t_end - t_start))
 
     # char_pos ngoài range → trả về cuối
     last = mapping[-1]
@@ -110,12 +123,6 @@ def split_sentences_into_single_lines(sentences: list, max_chars: int = 45) -> l
     Tách các câu dài thành các câu phụ đề ngắn có độ dài tối đa max_chars (phù hợp hiển thị 1 dòng).
     Sử dụng thông tin timestamps cấp độ từ (word-level timestamps) từ Whisper nếu có,
     ngược lại nội suy tuyến tính dựa trên vị trí từ.
-
-    Quy tắc bổ sung:
-    1. Tự động ngắt dòng ngay sau dấu phẩy (,), dấu chấm phẩy (;), dấu hai chấm (:) hoặc dấu kết câu
-       nếu độ dài của phân đoạn hiện tại đã đạt tối thiểu 12 ký tự hoặc có ít nhất 2 từ.
-    2. Nếu đoạn văn bản còn lại của câu chỉ còn tối đa 2 từ, gộp tất cả chúng vào phân đoạn hiện tại
-       để tránh tạo ra thẻ phụ đề bị mồ côi (chỉ chứa 1 hoặc 2 từ đơn độc ở cuối câu).
     """
     new_sents = []
     idx_counter = 0
@@ -140,7 +147,6 @@ def split_sentences_into_single_lines(sentences: list, max_chars: int = 45) -> l
         
         for idx, rw in enumerate(raw_words):
             remaining_words = total_raw_words - idx
-            # Nếu chỉ còn lại <= 2 từ trong câu, ép buộc gộp vào dòng hiện tại để tránh từ mồ côi
             force_no_split = (remaining_words <= 2)
             
             add_len = len(rw) + (1 if current_chunk else 0)
@@ -150,7 +156,6 @@ def split_sentences_into_single_lines(sentences: list, max_chars: int = 45) -> l
             if current_chunk and not force_no_split:
                 prev_w = current_chunk[-1]
                 clean_prev = prev_w.rstrip('*_"\'')
-                # Chỉ ngắt khi dòng đã có độ dài tối thiểu để tránh các từ mồi như "Ví dụ," bị ngắt riêng
                 if len(current_chunk) >= 2 or current_len >= 12:
                     if clean_prev.endswith((',', ';', ':', '.', '?', '!')):
                         prev_ended_with_punctuation = True
@@ -206,6 +211,12 @@ def split_sentences_into_single_lines(sentences: list, max_chars: int = 45) -> l
                 "words": []
             })
             idx_counter += 1
+
+    # Nối liền khoảng hở nhỏ giữa các dòng phụ đề để tránh nhấp nháy
+    for i in range(len(new_sents) - 1):
+        gap = new_sents[i + 1]["start_ms"] - new_sents[i]["end_ms"]
+        if 0 < gap < 300:
+            new_sents[i]["end_ms"] = new_sents[i + 1]["start_ms"]
             
     return new_sents
 

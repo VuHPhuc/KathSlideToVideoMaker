@@ -274,7 +274,11 @@ class TTSEngine:
             return
 
         if not self._current_model_name:
-            raise RuntimeError("Model chưa được load. Gọi load_model() trước.")
+            default_m = "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam TikTok - Trầm ấm Review)"
+            if default_m in VI_MALE_MODELS:
+                self.load_model(default_m)
+            else:
+                self.load_model(next(iter(VI_MALE_MODELS.keys())))
 
         info = VI_MALE_MODELS[self._current_model_name]
 

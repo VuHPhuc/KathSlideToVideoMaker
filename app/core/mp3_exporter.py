@@ -333,3 +333,28 @@ class ExportPipeline:
 
         _prog(100, "✓ Hoàn thành!")
         return result
+
+    def export_audio(
+        self,
+        text: str,
+        engine,
+        speaker_id: int = 0,
+        output_path: str = "",
+        progress_callback: Callable[[int, str], None] = None,
+        use_whisper: bool = True,
+        speed: float = 1.0,
+        period_pause_ms: int = 2000,
+        comma_pause_val: Union[str, int] = "normal",
+    ) -> Dict[str, Any]:
+        """Convenience wrapper for run()."""
+        return self.run(
+            text=text,
+            tts_engine=engine,
+            speaker_id=speaker_id,
+            output_mp3=output_path,
+            progress_callback=progress_callback,
+            use_whisper_align=use_whisper,
+            speed=speed,
+            period_pause_ms=period_pause_ms,
+            comma_pause_val=comma_pause_val,
+        )

@@ -5,6 +5,8 @@ main_window.py — Giao diện chính KathTTS Studio (PyQt6, Dark Theme)
 from __future__ import annotations
 
 import sys
+import os
+import shutil
 import tempfile
 import winsound
 from pathlib import Path
@@ -26,6 +28,11 @@ from PyQt6.QtWidgets import (
 )
 
 from app.ui.slide_sync_tab import SlideSyncTab
+from app.ui.ai_studio_tab import AIStudioTab
+from app.ui.auto_subtitle_tab import AutoSubtitleTab
+
+# Vô hiệu hóa tính năng lăn chuột làm đổi lựa chọn trên tất cả các dropdown QComboBox
+QComboBox.wheelEvent = lambda self, event: event.ignore()
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  STYLESHEET — Dark purple theme
@@ -485,6 +492,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_model_status()
 
+        # Khởi tạo chế độ ban đầu (mặc định: Quy trình Thủ công)
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        init_mode = settings.value("app_mode", "manual")
+        self._set_app_mode(init_mode)
+
     # ═══════════════════════════════════════════════════════════════════
     #  UI BUILD
     # ═══════════════════════════════════════════════════════════════════
@@ -502,7 +514,12 @@ class MainWindow(QMainWindow):
         # ── Stacked pages ─────────────────────────────────────────────
         self._stack = QStackedWidget()
 
-        # Page 0: MP3 creation (existing layout)
+        # Page 0: AI Auto Studio (All-in-One Pipeline)
+        self._ai_studio_tab = AIStudioTab(self._engine)
+        self._ai_studio_tab.storyboard_ready_to_sync.connect(self._on_ai_storyboard_sync)
+        self._stack.addWidget(self._ai_studio_tab)
+
+        # Page 1: MP3 creation (existing layout)
         mp3_page = QWidget()
         mp3_layout = QVBoxLayout(mp3_page)
         mp3_layout.setContentsMargins(0, 0, 0, 0)
@@ -516,13 +533,20 @@ class MainWindow(QMainWindow):
         mp3_layout.addWidget(splitter, 1)
         mp3_layout.addWidget(self._build_footer())
 
+        # Tự động cập nhật kịch bản sang editor ở Bước 2 khi AI Studio phân tích xong
+        self._ai_studio_tab.script_generated.connect(self._editor.setPlainText)
+
         self._stack.addWidget(mp3_page)
 
-        # Page 1: Slide sync tab
+        # Page 2: Slide sync tab
         self._slide_sync_tab = SlideSyncTab()
-        self._slide_sync_tab.request_back.connect(self._go_to_mp3_tab)
+        self._slide_sync_tab.request_back.connect(self._on_slide_tab_back_requested)
         self._slide_sync_tab.request_export.connect(self._on_export_video_requested)
         self._stack.addWidget(self._slide_sync_tab)
+
+        # Page 3: Auto Subtitle tab (Độc lập)
+        self._auto_subtitle_tab = AutoSubtitleTab()
+        self._stack.addWidget(self._auto_subtitle_tab)
 
         root_layout.addWidget(self._stack, 1)
 
@@ -575,25 +599,79 @@ class MainWindow(QMainWindow):
             "font-size: 17px; font-weight: 700; color: #e6edf3; background:transparent;"
         )
         lay.addWidget(title)
+        lay.addSpacing(16)
+
+        # ── Mode Switcher (2 Options: Thủ công vs Tự động hóa) ──
+        mode_container = QFrame()
+        mode_container.setStyleSheet("""
+            QFrame {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+            }
+        """)
+        mode_lay = QHBoxLayout(mode_container)
+        mode_lay.setContentsMargins(3, 3, 3, 3)
+        mode_lay.setSpacing(4)
+
+        self._manual_mode_btn = QPushButton("🎙  Quy trình Thủ công")
+        self._manual_mode_btn.setCheckable(True)
+        self._manual_mode_btn.setFixedHeight(28)
+        self._manual_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manual_mode_btn.setToolTip("Dành cho kịch bản có sẵn: Nhập văn bản ➔ Xuất MP3 ➔ Đồng bộ Slide ➔ Xuất Video")
+        self._manual_mode_btn.clicked.connect(lambda: self._set_app_mode("manual"))
+
+        self._ai_mode_btn = QPushButton("✨  AI Tự động hóa (All-in-One)")
+        self._ai_mode_btn.setCheckable(True)
+        self._ai_mode_btn.setFixedHeight(28)
+        self._ai_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ai_mode_btn.setToolTip("Tự động từ A-Z: Thả tài liệu ➔ Phân cảnh 7-10s ➔ Tạo Slide NotebookLM & Video 10s ➔ Xuất Video")
+        self._ai_mode_btn.clicked.connect(lambda: self._set_app_mode("ai"))
+
+        self._subtitle_mode_btn = QPushButton("🎬  Tạo & Dịch Phụ Đề Video")
+        self._subtitle_mode_btn.setCheckable(True)
+        self._subtitle_mode_btn.setFixedHeight(28)
+        self._subtitle_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._subtitle_mode_btn.setToolTip("Nhận diện giọng nói từ video ➔ Tự động dịch phụ đề đa ngôn ngữ ➔ Xuất video có phụ đề")
+        self._subtitle_mode_btn.clicked.connect(lambda: self._set_app_mode("subtitle"))
+
+        mode_lay.addWidget(self._manual_mode_btn)
+        mode_lay.addWidget(self._ai_mode_btn)
+        mode_lay.addWidget(self._subtitle_mode_btn)
+        lay.addWidget(mode_container)
         lay.addSpacing(20)
 
-        # ── Step indicator breadcrumb ──────────────────────────────────
-        self._step1_lbl = QLabel("● Bước 1: Tạo MP3")
+        # ── Step indicator breadcrumb (Clickable) ──────────────────────
+        self._step1_lbl = QLabel("● Bước 1: AI Auto Studio")
         self._step1_lbl.setObjectName("step-active")
+        self._step1_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step1_lbl.mousePressEvent = lambda e: self._go_to_ai_tab()
 
-        arrow1 = QLabel("→")
-        arrow1.setObjectName("step-arrow")
+        self._arrow1 = QLabel("→")
+        self._arrow1.setObjectName("step-arrow")
 
-        self._step2_lbl = QLabel("○ Bước 2: Đồng bộ Slide")
+        self._step2_lbl = QLabel("○ Bước 2: Tạo MP3")
         self._step2_lbl.setObjectName("step-inactive")
+        self._step2_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step2_lbl.mousePressEvent = lambda e: self._go_to_mp3_tab()
 
-        arrow2 = QLabel("→")
-        arrow2.setObjectName("step-arrow")
+        self._arrow2 = QLabel("→")
+        self._arrow2.setObjectName("step-arrow")
 
-        self._step3_lbl = QLabel("○ Bước 3: Xuất Video")
+        self._step3_lbl = QLabel("○ Bước 3: Đồng bộ Slide")
         self._step3_lbl.setObjectName("step-inactive")
+        self._step3_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step3_lbl.mousePressEvent = lambda e: self._go_to_slide_tab()
 
-        for w in [self._step1_lbl, arrow1, self._step2_lbl, arrow2, self._step3_lbl]:
+        self._arrow3 = QLabel("→")
+        self._arrow3.setObjectName("step-arrow")
+
+        self._step4_lbl = QLabel("○ Bước 4: Xuất Video")
+        self._step4_lbl.setObjectName("step-inactive")
+        self._step4_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._step4_lbl.mousePressEvent = lambda e: self._go_to_export_step()
+
+        for w in [self._step1_lbl, self._arrow1, self._step2_lbl, self._arrow2, self._step3_lbl, self._arrow3, self._step4_lbl]:
             lay.addWidget(w)
 
         lay.addStretch()
@@ -758,7 +836,8 @@ class MainWindow(QMainWindow):
         else:
             self._speed_combo.setCurrentIndex(2)  # Default to 1.0x
         
-        self._speed_combo.currentTextChanged.connect(self._save_speed_setting)
+        self._speed_combo.currentIndexChanged.connect(lambda: self._save_speed_setting(self._speed_combo.currentText()))
+        self._save_speed_setting(self._speed_combo.currentText())
         col2.addWidget(self._speed_combo)
         param_row.addLayout(col2, 1)
 
@@ -825,7 +904,8 @@ class MainWindow(QMainWindow):
         else:
             self._period_pause_combo.setCurrentIndex(3) # Default to 0.5s
             
-        self._period_pause_combo.currentTextChanged.connect(self._save_period_pause_setting)
+        self._period_pause_combo.currentIndexChanged.connect(lambda: self._save_period_pause_setting(self._period_pause_combo.currentText()))
+        self._save_period_pause_setting(self._period_pause_combo.currentText())
         lay.addWidget(self._period_pause_combo)
 
         # Comma Pause
@@ -849,7 +929,8 @@ class MainWindow(QMainWindow):
         else:
             self._comma_pause_combo.setCurrentIndex(3) # Default to 0.2s
             
-        self._comma_pause_combo.currentTextChanged.connect(self._save_comma_pause_setting)
+        self._comma_pause_combo.currentIndexChanged.connect(lambda: self._save_comma_pause_setting(self._comma_pause_combo.currentText()))
+        self._save_comma_pause_setting(self._comma_pause_combo.currentText())
         lay.addWidget(self._comma_pause_combo)
 
         lay.addSpacing(4)
@@ -869,7 +950,7 @@ class MainWindow(QMainWindow):
                 last_dir = str(Path.home())
         
         from datetime import datetime
-        default_name = f"{datetime.now().strftime('%d-%m-%Y')}.mp3"
+        default_name = f"Audio_{datetime.now().strftime('%Y_%m_%d_%H%M%S')}.mp3"
         default_path = str(Path(last_dir) / default_name)
         self._out_path.setText(default_path)
 
@@ -1095,14 +1176,23 @@ class MainWindow(QMainWindow):
     def _save_speed_setting(self, speed_text: str):
         settings = QSettings("KathTTS", "KathSlideToVideoMaker")
         settings.setValue("last_selected_speed", speed_text)
+        val = self._speed_combo.currentData()
+        if val is not None:
+            settings.setValue("last_speed_val", float(val))
 
     def _save_period_pause_setting(self, text: str):
         settings = QSettings("KathTTS", "KathSlideToVideoMaker")
         settings.setValue("last_period_pause", text)
+        val = self._period_pause_combo.currentData()
+        if val is not None:
+            settings.setValue("last_period_pause_val", int(val))
 
     def _save_comma_pause_setting(self, text: str):
         settings = QSettings("KathTTS", "KathSlideToVideoMaker")
         settings.setValue("last_comma_pause", text)
+        val = self._comma_pause_combo.currentData()
+        if val is not None:
+            settings.setValue("last_comma_pause_val", val)
 
     # ═══════════════════════════════════════════════════════════════════
     #  EVENT HANDLERS
@@ -1242,7 +1332,7 @@ class MainWindow(QMainWindow):
                 initial_dir = str(Path.home())
 
         from datetime import datetime
-        default_name = f"{datetime.now().strftime('%d-%m-%Y')}.mp3"
+        default_name = f"Audio_{datetime.now().strftime('%Y_%m_%d_%H%M%S')}.mp3"
         default_path = str(Path(initial_dir) / default_name)
 
         path, _ = QFileDialog.getSaveFileName(
@@ -1438,45 +1528,323 @@ class MainWindow(QMainWindow):
 
 
 
+    def _set_app_mode(self, mode: str):
+        self._current_mode = mode
+        settings = QSettings("KathTTS", "KathSlideToVideoMaker")
+        settings.setValue("app_mode", mode)
+
+        _btn_inactive = """
+            QPushButton {
+                background-color: transparent;
+                color: #8b949e;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 14px;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #161b22;
+                color: #c9d1d9;
+            }
+        """
+
+        if mode == "manual":
+            self._manual_mode_btn.setChecked(True)
+            self._ai_mode_btn.setChecked(False)
+            self._subtitle_mode_btn.setChecked(False)
+            self._manual_mode_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1f6feb;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-weight: 700;
+                    font-size: 12px;
+                }
+            """)
+            self._ai_mode_btn.setStyleSheet(_btn_inactive)
+            self._subtitle_mode_btn.setStyleSheet(_btn_inactive)
+            self._step1_lbl.setVisible(False)
+            self._arrow1.setVisible(False)
+            for w in [self._step2_lbl, self._arrow2, self._step3_lbl, self._arrow3, self._step4_lbl]:
+                w.setVisible(True)
+            self._go_to_mp3_tab()
+
+        elif mode == "ai":
+            self._manual_mode_btn.setChecked(False)
+            self._ai_mode_btn.setChecked(True)
+            self._subtitle_mode_btn.setChecked(False)
+            self._ai_mode_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7c3aed;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-weight: 700;
+                    font-size: 12px;
+                }
+            """)
+            self._manual_mode_btn.setStyleSheet(_btn_inactive)
+            self._subtitle_mode_btn.setStyleSheet(_btn_inactive)
+            for w in [self._step1_lbl, self._arrow1, self._step2_lbl, self._arrow2, self._step3_lbl, self._arrow3, self._step4_lbl]:
+                w.setVisible(True)
+            self._go_to_ai_tab()
+
+        elif mode == "subtitle":
+            self._manual_mode_btn.setChecked(False)
+            self._ai_mode_btn.setChecked(False)
+            self._subtitle_mode_btn.setChecked(True)
+            self._subtitle_mode_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #238636;
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-weight: 700;
+                    font-size: 12px;
+                }
+            """)
+            self._manual_mode_btn.setStyleSheet(_btn_inactive)
+            self._ai_mode_btn.setStyleSheet(_btn_inactive)
+            for w in [self._step1_lbl, self._arrow1, self._step2_lbl, self._arrow2, self._step3_lbl, self._arrow3, self._step4_lbl]:
+                w.setVisible(False)
+            self._stack.setCurrentWidget(self._auto_subtitle_tab)
+
+    def _update_step_indicator(self, active_step: int):
+        """Cập nhật giao diện thanh Breadcrumb linh hoạt theo chế độ."""
+        if getattr(self, "_current_mode", "manual") == "manual":
+            # Chế độ thủ công: 3 bước
+            self._slide_sync_tab.set_back_button_text("⬅  Quay lại Bước 1: Tạo MP3")
+            steps = [
+                (self._step2_lbl, "Bước 1: Tạo MP3", 2),
+                (self._step3_lbl, "Bước 2: Đồng bộ Slide", 3),
+                (self._step4_lbl, "Bước 3: Xuất Video", 4),
+            ]
+            for lbl, text, step_num in steps:
+                if step_num < active_step:
+                    lbl.setText(f"✓ {text}")
+                    lbl.setObjectName("step-inactive")
+                elif step_num == active_step:
+                    lbl.setText(f"● {text}")
+                    lbl.setObjectName("step-active")
+                else:
+                    lbl.setText(f"○ {text}")
+                    lbl.setObjectName("step-inactive")
+                lbl.style().unpolish(lbl)
+                lbl.style().polish(lbl)
+        else:
+            # Chế độ AI Tự động: 4 bước
+            self._slide_sync_tab.set_back_button_text("⬅  Quay lại Bước 1: AI Studio")
+            steps = [
+                (self._step1_lbl, "Bước 1: AI Auto Studio", 1),
+                (self._step2_lbl, "Bước 2: Tạo MP3", 2),
+                (self._step3_lbl, "Bước 3: Đồng bộ Slide", 3),
+                (self._step4_lbl, "Bước 4: Xuất Video", 4),
+            ]
+            for lbl, text, step_num in steps:
+                if step_num < active_step:
+                    lbl.setText(f"✓ {text}")
+                    lbl.setObjectName("step-inactive")
+                elif step_num == active_step:
+                    lbl.setText(f"● {text}")
+                    lbl.setObjectName("step-active")
+                else:
+                    lbl.setText(f"○ {text}")
+                    lbl.setObjectName("step-inactive")
+                lbl.style().unpolish(lbl)
+                lbl.style().polish(lbl)
+
+    def _on_slide_tab_back_requested(self):
+        """Quay lại bước trước đó từ Tab Đồng bộ Slide."""
+        if getattr(self, "_current_mode", "manual") == "ai":
+            self._go_to_ai_tab()
+        else:
+            self._go_to_mp3_tab()
+
+    def _go_to_ai_tab(self):
+        self._stack.setCurrentIndex(0)
+        self._update_step_indicator(1)
+
+    def _go_to_mp3_tab(self):
+        # Đồng bộ kịch bản từ AI Studio sang nếu Bước 2 đang trống
+        scenes = self._ai_studio_tab.storyboard_data.get("scenes", [])
+        if scenes:
+            voiceover_list = []
+            for s in scenes:
+                v_text = s.get("voiceover_text", "").strip()
+                if v_text:
+                    if not v_text.endswith((".", "!", "?", "...", ":", ";")):
+                        v_text += "."
+                    voiceover_list.append(v_text)
+            full_script = " ".join(voiceover_list)
+            if full_script and not self._editor.toPlainText().strip():
+                self._editor.setPlainText(full_script)
+
+        self._stack.setCurrentIndex(1)
+        self._update_step_indicator(2)
+
+    def _go_to_slide_tab(self):
+        # 0. Kiểm tra nếu AI Studio đang bận chạy (phân tích, render slide, tạo MP3)
+        if self._ai_studio_tab.is_busy():
+            QMessageBox.information(
+                self, "Đang tạo MP3",
+                "Hệ thống đang tiến hành đọc kịch bản & phân tích timestamps Whisper.\n\n"
+                "Vui lòng đợi tiến trình hoàn tất, hệ thống sẽ tự động chuyển sang Bước 3!"
+            )
+            return
+
+        # 0b. Kiểm tra nếu tiến trình xuất MP3 thủ công đang chạy
+        if hasattr(self, "_export_thread") and self._export_thread is not None and self._export_thread.isRunning():
+            QMessageBox.information(
+                self, "Đang xuất MP3",
+                "Tiến trình tạo MP3 đang chạy.\n\nVui lòng đợi hoàn thành trước khi chuyển sang Bước 3!"
+            )
+            return
+
+        # 1. Nếu đang có kịch bản & phân cảnh trong AI Studio, ưu tiên đồng bộ toàn bộ sang Timeline
+        scenes = self._ai_studio_tab.storyboard_data.get("scenes", [])
+        if scenes:
+            self._ai_studio_tab._start_full_pipeline_sync()
+            return
+
+        # 2. Quy trình thủ công: kiểm tra đường dẫn MP3
+        mp3_path = self._out_path.text().strip()
+        if not mp3_path or not Path(mp3_path).exists():
+            # Kiểm tra xem có MP3 từ pipeline hoặc AI Studio không
+            out_dir = Path(tempfile.gettempdir()) / "KathFlow_Export"
+            pipeline_mp3 = out_dir / "voiceover.mp3"
+            from app.ui.ai_studio_tab import get_ai_media_output_dir
+            ai_mp3 = get_ai_media_output_dir() / "voiceover.mp3"
+            if ai_mp3.exists() and ai_mp3.stat().st_size > 1000:
+                mp3_path = str(ai_mp3)
+            elif pipeline_mp3.exists() and pipeline_mp3.stat().st_size > 1000:
+                mp3_path = str(pipeline_mp3)
+            else:
+                QMessageBox.information(self, "Chưa có MP3", "Vui lòng hoàn thành Bước 1 (AI Studio) hoặc Bước 2 (Tạo MP3) trước.")
+                return
+        self._switch_to_slide_tab(mp3_path)
+
+    def _go_to_export_step(self):
+        """Chuyển hoặc kích hoạt bước 4: Xuất Video."""
+        if self._ai_studio_tab.is_busy() or (hasattr(self, "_export_thread") and self._export_thread is not None and self._export_thread.isRunning()):
+            QMessageBox.information(
+                self, "Đang xử lý",
+                "Hệ thống đang bận tạo âm thanh MP3 / Slide. Vui lòng đợi hoàn tất trước khi chuyển bước!"
+            )
+            return
+
+        if self._stack.currentIndex() != 2:
+            self._go_to_slide_tab()
+        if self._stack.currentIndex() == 2:
+            self._slide_sync_tab._go_export()
+
     def _switch_to_slide_tab(self, mp3_path: str, script_text: str = "", has_json: bool = True):
         """Chuyển sang tab đồng bộ slide và truyền context."""
         if not script_text:
             script_text = self._editor.toPlainText()
         self._slide_sync_tab.load_context(script_text, mp3_path, has_json=has_json)
-        self._stack.setCurrentIndex(1)
-        # Update step indicator
-        self._step1_lbl.setText("✓ Bước 1: Tạo MP3")
-        self._step1_lbl.setObjectName("step-inactive")
-        self._step2_lbl.setText("● Bước 2: Đồng bộ Slide")
-        self._step2_lbl.setObjectName("step-active")
-        # Force style refresh
-        for lbl in [self._step1_lbl, self._step2_lbl]:
-            lbl.style().unpolish(lbl)
-            lbl.style().polish(lbl)
+        self._stack.setCurrentIndex(2)
+        self._update_step_indicator(3)
 
-    def _go_to_mp3_tab(self):
-        """Quay lại tab tạo MP3."""
-        self._stack.setCurrentIndex(0)
-        self._step1_lbl.setText("● Bước 1: Tạo MP3")
-        self._step1_lbl.setObjectName("step-active")
-        self._step2_lbl.setText("○ Bước 2: Đồng bộ Slide")
-        self._step2_lbl.setObjectName("step-inactive")
-        for lbl in [self._step1_lbl, self._step2_lbl]:
-            lbl.style().unpolish(lbl)
-            lbl.style().polish(lbl)
+    def _on_ai_storyboard_sync(self, storyboard_data: dict, full_script: str, media_list: list):
+        """Xử lý khi AI Studio bấm 'Đồng bộ Timeline & Tiếp tục' hoặc hoàn tất tự động."""
+        self._editor.setPlainText(full_script)
+
+        target_mp3 = getattr(self._ai_studio_tab, "_generated_mp3_path", "")
+        last_synced_script = getattr(self._ai_studio_tab, "_last_synced_script", "")
+
+        # 1. KIỂM TRA THAY ĐỔI:
+        # Nếu kịch bản thuyết minh KHÔNG ĐỔI (người dùng chỉ thay ảnh/video/layout) và file MP3 vẫn tồn tại:
+        # -> KHÔNG CẦN TẠO LẠI MP3, nạp trực tiếp media vào timeline trong 0.1s!
+        if (
+            last_synced_script
+            and last_synced_script.strip() == full_script.strip()
+            and target_mp3
+            and os.path.exists(target_mp3)
+            and os.path.getsize(target_mp3) > 500
+        ):
+            self._out_path.setText(target_mp3)
+            self._slide_sync_tab.load_pipeline_media(full_script, target_mp3, media_list)
+            self._stack.setCurrentIndex(2)
+            self._update_step_indicator(3)
+            self._set_status(f"✓ Đã cập nhật Slide/Video mới vào Timeline (Giữ nguyên âm thanh {Path(target_mp3).name})!")
+            return
+
+        # 2. NẾU KỊCH BẢN CÓ THAY ĐỔI (thêm slide, sửa thuyết minh, xóa slide) HOẶC CHƯA CÓ MP3:
+        # -> Tự động chạy lại TTS & Whisper để sinh MP3 mới chính xác 100%!
+        project_out = Path(os.getcwd()) / "output"
+        project_out.mkdir(parents=True, exist_ok=True)
+
+        from datetime import datetime
+        date_str = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+        out_mp3 = str(project_out / f"Audio_{date_str}.mp3")
+        self._out_path.setText(out_mp3)
+
+        # Lấy các setting TTS hiện tại của người dùng
+        model_name = self._model_combo.currentText() if self._model_combo.count() > 0 else "Edge-TTS vi-VN-NamMinhNeural (Giọng Nam TikTok - Trầm ấm Review)"
+        try:
+            self._engine.load_model(model_name)
+        except Exception:
+            pass
+
+        speaker_id = self._speaker_combo.currentData() if self._speaker_combo.count() > 0 else 0
+        speed = self._speed_combo.currentData() if self._speed_combo.currentData() else 1.15
+        period_pause_ms = self._period_pause_combo.currentData() if self._period_pause_combo.currentData() else 500
+        comma_pause_val = self._comma_pause_combo.currentData() if self._comma_pause_combo.currentData() else 200
+        use_whisper = self._whisper_check.isChecked()
+
+        # Cập nhật hiển thị tiến độ trực quan ngay trên Tab Bước 1 (AI Studio)
+        self._ai_studio_tab.top_progress.setVisible(True)
+        self._ai_studio_tab.top_progress.setValue(5)
+        self._ai_studio_tab.sync_pipeline_btn.setEnabled(False)
+        self._ai_studio_tab.sync_pipeline_btn.setText("⏳ Đang tạo âm thanh MP3 & Whisper...")
+        self._ai_studio_tab.status_lbl.setText("Kịch bản có thay đổi. Đang tạo lại âm thanh thuyết minh và phân tích Whisper...")
+
+        self._export_progress.setVisible(True)
+        self._export_progress.setValue(0)
+        self._set_status("Đang tạo âm thanh thuyết minh mới và phân tích Timestamps Whisper...")
+
+        self._export_thread = ExportThread(
+            self._pipeline, full_script, self._engine,
+            speaker_id, out_mp3, use_whisper, speed=speed,
+            period_pause_ms=period_pause_ms, comma_pause_val=comma_pause_val,
+        )
+
+        def on_progress(pct: int, msg: str):
+            self._ai_studio_tab.top_progress.setValue(pct)
+            self._ai_studio_tab.status_lbl.setText(f"{msg} ({pct}%)")
+            self._export_progress.setValue(pct)
+            self._set_status(msg)
+
+        def on_done(success, err):
+            self._ai_studio_tab.top_progress.setVisible(False)
+            self._ai_studio_tab.sync_pipeline_btn.setEnabled(True)
+            self._ai_studio_tab.sync_pipeline_btn.setText("🚀  Đồng bộ Timeline & Tiếp tục  ➔")
+            self._export_progress.setVisible(False)
+
+            if success:
+                self._ai_studio_tab._generated_mp3_path = out_mp3
+                self._ai_studio_tab._last_synced_script = full_script
+                self._slide_sync_tab.load_pipeline_media(full_script, out_mp3, media_list)
+                self._stack.setCurrentIndex(2)
+                self._update_step_indicator(3)
+                self._set_status(f"✓ Đã xuất {Path(out_mp3).name} và đồng bộ vào Timeline!")
+            else:
+                QMessageBox.critical(self, "Lỗi tạo Audio", f"Không thể xuất file MP3:\n{err}")
+
+        self._export_thread.progress.connect(on_progress)
+        self._export_thread.finished.connect(on_done)
+        self._export_thread.start()
 
     def _on_export_video_requested(self, slides: list):
         """Xử lý khi người dùng nhấn 'Tiếp tục → Xuất Video'."""
-        # Cập nhật step 3 indicator
-        self._step2_lbl.setText("✓ Bước 2: Đồng bộ Slide")
-        self._step2_lbl.setObjectName("step-inactive")
-        self._step3_lbl.setText("● Bước 3: Xuất Video")
-        self._step3_lbl.setObjectName("step-active")
-        for lbl in [self._step2_lbl, self._step3_lbl]:
-            lbl.style().unpolish(lbl)
-            lbl.style().polish(lbl)
+        self._update_step_indicator(4)
         QMessageBox.information(
-            self, "Bước 3: Xuất Video",
+            self, "Bước 4: Xuất Video",
             f"Sẵn sàng xuất video với {len(slides)} slide.\n\n"
-            "Tính năng Xuất Video sẽ được thêm vào ở phiên bản tiếp theo."
+            "Tính năng Xuất Video sẽ được hoàn tất."
         )

@@ -788,6 +788,63 @@ class SlideSyncTab(QWidget):
 
         self._update_stats()
 
+    def load_pipeline_media(self, script_text: str, mp3_path: str, media_dicts: list):
+        """Nạp trực tiếp danh sách media đã tạo tự động từ AI Studio vào timeline và gán vị trí chính xác."""
+        self.load_context(script_text, mp3_path, has_json=True)
+        self._media_items.clear()
+
+        char_pos = 0
+        for idx, m in enumerate(media_dicts, 1):
+            m_type = m.get("type", "video")
+            m_path = m.get("path", "")
+            item = MediaItem(media_type=m_type, path=m_path, duration_sec=10.0 if m_type == "video" else 5.0)
+            item.transition_in = "fade"
+            item.transition_dur = 0.5
+            item._display_number = idx
+
+            # Tìm vị trí bắt đầu đoạn thuyết minh của cảnh này trong kịch bản
+            vo = m.get("voiceover", "").strip()
+            if vo and vo in script_text:
+                pos = script_text.find(vo, char_pos)
+                if pos != -1:
+                    item.assigned_pos = pos
+                    char_pos = pos + len(vo)
+                else:
+                    item.assigned_pos = char_pos
+            else:
+                item.assigned_pos = char_pos
+
+            if m_type == "video":
+                item.video_volume = 0.3
+                thumb_tmp = tempfile.mktemp(suffix=".jpg")
+                try:
+                    subprocess.run(["ffmpeg", "-y", "-ss", "0.5", "-i", m_path, "-vframes", "1", thumb_tmp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.path.exists(thumb_tmp):
+                        item.thumbnail_path = thumb_tmp
+                except Exception:
+                    pass
+            else:
+                # Đảm bảo gán SlideInfo đầy đủ
+                slide_info = SlideInfo(
+                    index=idx - 1,
+                    image_path=m_path,
+                    title=m.get("voiceover", "") or m.get("title", ""),
+                )
+                slide_info.assigned_pos = item.assigned_pos
+                slide_info.assigned_text = vo[:45]
+                item.slide_info = slide_info
+                item.media_type = "slide"
+
+            self._media_items.append(item)
+
+        self._rebuild_timeline()
+        self._refresh_editor_from_slides()
+        self._update_stats()
+
+    def set_back_button_text(self, text: str):
+        if hasattr(self, "_back_btn") and self._back_btn is not None:
+            self._back_btn.setText(text)
+
     # ──────────────────────────────────────────────────────────────────────
     #  UI BUILD
     # ──────────────────────────────────────────────────────────────────────
@@ -1214,8 +1271,8 @@ class SlideSyncTab(QWidget):
         lay.setContentsMargins(16, 10, 16, 10)
         lay.setSpacing(10)
 
-        back_btn = QPushButton("←  Quay lại tạo MP3")
-        back_btn.clicked.connect(self.request_back.emit)
+        self._back_btn = QPushButton("⬅  Quay lại")
+        self._back_btn.clicked.connect(self.request_back.emit)
 
         save_btn = QPushButton("💾  Lưu dự án")
         save_btn.clicked.connect(self._save_project)
@@ -1235,7 +1292,7 @@ class SlideSyncTab(QWidget):
         self._next_btn.setMinimumWidth(180)
         self._next_btn.clicked.connect(self._go_export)
 
-        lay.addWidget(back_btn)
+        lay.addWidget(self._back_btn)
         lay.addWidget(save_btn)
         lay.addStretch()
         lay.addWidget(self._action_stats)

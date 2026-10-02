@@ -808,16 +808,33 @@ class PreviewVideoDialog(QDialog):
         
         if img_path and os.path.exists(img_path) and not img_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
             pix = QPixmap(img_path)
-            self._img_lbl.setPixmap(
-                pix.scaled(self._img_lbl.width() or 760,
-                           self._img_lbl.height() or 380,
-                           Qt.AspectRatioMode.KeepAspectRatio,
-                           Qt.TransformationMode.SmoothTransformation)
-            )
-            self._img_lbl.setText("")
+            if not pix.isNull():
+                self._img_lbl.setPixmap(
+                    pix.scaled(self._img_lbl.width() or 760,
+                               self._img_lbl.height() or 380,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+                )
+                self._img_lbl.setText("")
+            else:
+                self._img_lbl.setPixmap(QPixmap())
+                self._img_lbl.setText(f"🖼  {getattr(slide, 'display_name', 'Slide')}")
+        elif getattr(slide, "thumbnail_path", "") and os.path.exists(getattr(slide, "thumbnail_path", "")):
+            pix = QPixmap(slide.thumbnail_path)
+            if not pix.isNull():
+                self._img_lbl.setPixmap(
+                    pix.scaled(self._img_lbl.width() or 760,
+                               self._img_lbl.height() or 380,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+                )
+                self._img_lbl.setText("")
+            else:
+                self._img_lbl.setPixmap(QPixmap())
+                self._img_lbl.setText(f"🎥  {getattr(slide, 'display_name', 'Video Clip')}")
         else:
             self._img_lbl.setPixmap(QPixmap())
-            self._img_lbl.setText(f"🎥  {slide.display_name}")
+            self._img_lbl.setText(f"🎥  {getattr(slide, 'display_name', 'Video Clip')}")
 
         title = getattr(slide, "title", "") if hasattr(slide, "title") else ""
         title_str = f" — {title}" if title else ""
@@ -859,7 +876,7 @@ class PreviewVideoDialog(QDialog):
                     f"(Slide {self._cur_idx + 1}/{len(self._timeline)})"
                 )
 
-        # Cập nhật phụ đề
+        # Cập nhật phụ đề (chỉ cập nhật layout khi text thay đổi để tránh nghẽn GUI)
         current_text = ""
         for sent in self._sentences:
             start_ms = sent.get("start_ms", 0)
@@ -869,11 +886,14 @@ class PreviewVideoDialog(QDialog):
                 break
 
         if self.sub_settings.get("enabled", True):
-            self._sub_overlay.setText(current_text)
-            self._sub_overlay.setVisible(bool(current_text))
-            self._reposition_sub_overlay()
+            if current_text != self._sub_overlay.text():
+                self._sub_overlay.setText(current_text)
+                self._sub_overlay.setVisible(bool(current_text))
+                if current_text:
+                    self._reposition_sub_overlay()
         else:
-            self._sub_overlay.setVisible(False)
+            if self._sub_overlay.isVisible():
+                self._sub_overlay.setVisible(False)
  
     def _on_player_state_changed(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
@@ -918,36 +938,23 @@ class PreviewVideoDialog(QDialog):
             mp3_path=self.mp3_path,
             json_path=self.json_path,
             sub_settings=self.sub_settings,
+            media_items=self.media_items,
             parent=self,
         )
         dlg.exec()
 
+    def reject(self):
+        if hasattr(self, "_player") and self._player is not None:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+        super().reject()
+
     def closeEvent(self, event):
-        try:
-            self._player.stop()
-            self._video_player.stop()
-            # Ngắt các kết nối signal để tránh callback chạy khi các widget đang bị hủy
+        if hasattr(self, "_player") and self._player is not None:
             try:
-                self._player.positionChanged.disconnect()
+                self._player.stop()
             except Exception:
                 pass
-            try:
-                self._player.playbackStateChanged.disconnect()
-            except Exception:
-                pass
-            
-            # Giải phóng source và audio output
-            self._player.setAudioOutput(None)
-            self._player.setSource(QUrl())
-            
-            self._video_player.setAudioOutput(None)
-            self._video_player.setSource(QUrl())
-            
-            # Hủy đối tượng an toàn trong event loop của Qt
-            self._player.deleteLater()
-            self._audio_output.deleteLater()
-            self._video_player.deleteLater()
-            self._video_audio.deleteLater()
-        except Exception:
-            pass
         super().closeEvent(event)

@@ -42,3 +42,8 @@ output/**
 *.pptx
 *.slides.json
 .google_flow_profile/
+
+# PyInstaller build artifacts & release archives
+build/
+dist/
+*.zip

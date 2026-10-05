@@ -46,14 +46,23 @@
 
 ---
 
-## 🛠 Yêu Cầu Hệ Thống
+## 📦 Tải Bản Phát Hành (Khuyên dùng cho người dùng cuối)
+
+Nếu bạn không muốn cài đặt Python hoặc môi trường lập trình, hãy tải trực tiếp bản đóng gói sẵn:
+1. Vào mục [Releases](https://github.com/VuHPhuc/KathSlideToVideoMaker/releases) trên GitHub.
+2. Tải tệp `KathFlow-v1.0.0-windows-x64.zip`.
+3. Giải nén tệp zip và nhấp đúp chạy trực tiếp **`KathFlow.exe`** (đã tích hợp đầy đủ Python, Qt, AI Engine và FFmpeg).
+
+---
+
+## 🛠 Yêu Cầu Hệ Thống (Dành cho nhà phát triển)
 
 1. **Python 3.10** hoặc mới hơn.
 2. **FFmpeg** đã được cài đặt và thêm vào biến môi trường hệ thống (`PATH`).
 
 ---
 
-## 🚀 Hướng Dẫn Cài Đặt
+## 🚀 Hướng Dẫn Cài Đặt Từ Mã Nguồn
 
 Chương trình hỗ trợ script tự động hóa toàn bộ quy trình cài đặt môi trường trên Windows:
 
@@ -65,11 +74,11 @@ Chương trình hỗ trợ script tự động hóa toàn bộ quy trình cài �
 
 ---
 
-## 💻 Hướng Dẫn Sử Dụng
+## 💻 Hướng Dẫn Khởi Chạy Từ Mã Nguồn
 
 Sau khi cài đặt xong, bạn có hai cách cực kỳ đơn giản để khởi chạy studio:
 
-### Cách 1: Sử dụng Launcher (Khuyên dùng)
+### Cách 1: Sử dụng Launcher
 * Nhấp đúp chuột vào file **`KathFlow.exe`** ở thư mục gốc của dự án.
 * Đây là chương trình khởi chạy ngầm siêu nhẹ tích hợp icon đại diện chính thức của ứng dụng, giúp khởi động ứng dụng trực tiếp thông qua môi trường ảo mà không hiện lên màn hình dòng lệnh CMD màu đen.
 
